@@ -1,4 +1,15 @@
 <div align="center">
+  <img
+    src="assets/edopt-repository-banner.png"
+    alt="eDOPT Electric Depot Optimization Tool"
+    width="100%"
+  />
+</div>
+
+<br>
+
+<div align="center">
+
 
 # eDOPT: Electric Depot Optimization & Planning Tool
 
