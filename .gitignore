@@ -57,6 +57,10 @@ ENV/
 Thumbs.db
 
 # --- Project Specific ---
+# Exclude upload scripts
+upload_to_github.cmd
+git.cmd
+
 # Exclude scratch / temporary scripts directories
 scratch/
 backend/scratch/
