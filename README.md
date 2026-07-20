@@ -172,5 +172,5 @@ This project is licensed under the **Non-Commercial & Educational License**. See
 ---
 
 <div align="center">
-  <sub>Developed for Smart Electric Bus Depot Optimization</sub>
+  <sub>Developed in cooperation with ÖBB Innovation Lab</sub>
 </div>
