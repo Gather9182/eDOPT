@@ -1,0 +1,67 @@
+# ==========================================
+#  eDOPT (energytool) Root .gitignore
+# ==========================================
+
+# --- Node.js / Frontend ---
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+frontend/lerna-debug.log*
+frontend/*.local
+
+# --- Python / Backend ---
+# Byte-compiled / optimized / DLL files
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+
+# Virtual Environments
+backend/.venv/
+backend/venv/
+backend/env/
+backend/ENV/
+.venv/
+venv/
+env/
+ENV/
+
+# Distribution / packaging
+**/develop-eggs/
+**/downloads/
+**/eggs/
+**/.eggs/
+**/lib/
+**/lib64/
+**/parts/
+**/sdist/
+**/var/
+**/wheels/
+**/*.egg-info/
+**/.installed.cfg
+**/.egg
+
+# PyCharm / VS Code / IDEs
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.DS_Store
+Thumbs.db
+
+# --- Project Specific ---
+# Exclude scratch / temporary scripts directories
+scratch/
+backend/scratch/
+
+# Data and large temporary files
+*.xlsx
+# But keep the specific test Excel file required for the backend to run
+!backend/Umlaeufe_Salzburg_Nord_synthetisch.xlsx
