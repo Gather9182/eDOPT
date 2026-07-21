@@ -1,7 +1,7 @@
 <div align="center">
   <img
     src="assets/edopt-repository-banner.png"
-    alt="eDOPT Electric Depot Optimization Tool"
+    alt="eDOPT Electric Depot Optimization Tool repository banner"
     width="100%"
   />
 </div>
@@ -10,12 +10,11 @@
 
 <div align="center">
 
+# eDOPT
 
-# eDOPT: Electric Depot Optimization & Planning Tool
+**Electric Depot Optimization & Planning Tool**
 
-**Optimization-based decision support for electric bus depot charging**
-
-eDOPT is a web-based research prototype for analyzing electricity procurement and charging schedules in battery-electric bus depots. It combines a mixed-integer linear programming model with vehicle circulation data, electricity price inputs, depot infrastructure constraints, and optional photovoltaic and stationary battery storage scenarios.
+A web-based research prototype for analyzing electricity procurement and charging schedules in battery-electric bus depots.
 
 [![License](https://img.shields.io/badge/License-Non--Commercial-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-green.svg)](https://www.python.org/)
@@ -37,7 +36,7 @@ eDOPT was developed by **Martin Pfeiffer, BSc.** as the software artifact of the
 
 The thesis was conducted at the **Vienna University of Economics and Business (WU Vienna)**, within the **Institute for Data, Energy, and Sustainability (IDEaS)** at the Department of Information Systems and Operations Management.
 
-Academic supervision was provided by **Behnam Zakeri, DSc.**, with **Dr. Amin Anjomshoaa** as co-supervisor. The project was developed in cooperation with the **ÖBB Innovation Lab** and **Postbus GmbH**. The industry partners contributed to the underlying problem definition, provided operational context and case-study data, and supported the applied development of the framework.
+Academic supervision was provided by **Behnam Zakeri, DSc.**, with **Dr. Amin Anjomshoaa** as co-supervisor. The project was developed in cooperation with the **ÖBB Open Innovation** and **Postbus GmbH**. The industry partners contributed to the underlying problem definition, provided operational context and case-study data, and supported the applied development of the framework.
 
 The repository contains the implementation of the decision-support tool developed for the thesis. Confidential operational data used in the Wels case study are not included.
 
@@ -182,6 +181,8 @@ eDOPT/
 │   │   └── App.jsx                  # Application state and routing
 │   ├── package.json                 # Frontend dependencies and scripts
 │   └── vite.config.js               # Vite configuration
+├── assets/
+│   └── edopt-repository-banner.png  # README and repository banner
 ├── install_dependencies.cmd         # Dependency installation script
 ├── start_all.cmd                    # Frontend and backend launcher
 ├── start_backend.cmd                # Backend launcher
@@ -243,8 +244,8 @@ Commercial use, redistribution as part of a paid service, or incorporation into 
 
 This project was developed as part of a master's thesis at WU Vienna under the supervision of **Behnam Zakeri, DSc.**, with **Dr. Amin Anjomshoaa** as co-supervisor.
 
-The practical problem setting and case-study context were developed in cooperation with the **ÖBB Innovation Lab** and **Postbus GmbH**. Particular thanks are due to **Jan Hilmar, PhD**, and **Felix Grossar, MA**, for their guidance, operational insights, and support with the case-study data.
+The practical problem setting and case-study context were developed in cooperation with the **ÖBB Open Innovation** and **Postbus GmbH**. Particular thanks are due to **Jan Hilmar, PhD**, and **Felix Grossar, MA**, for their guidance, operational insights, and support with the case-study data.
 
 <div align="center">
-  <sub>Master's thesis project by Martin Pfeiffer, BSc. | WU Vienna | In cooperation with ÖBB Innovation Lab and Postbus GmbH</sub>
+  <sub>Master's thesis project by Martin Pfeiffer, BSc. | WU Vienna | In cooperation with ÖBB Open Innovation and Postbus GmbH</sub>
 </div>
