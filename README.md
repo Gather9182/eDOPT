@@ -21,6 +21,9 @@ A web-based research prototype for analyzing electricity procurement and chargin
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688.svg)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-18.2-61DAFB.svg)](https://reactjs.org/)
 [![Vite](https://img.shields.io/badge/Vite-5.0-646CFF.svg)](https://vitejs.dev/)
+[![aWATTar API](https://img.shields.io/badge/API-aWATTar%20Market-orange.svg)](https://www.awattar.at/)
+[![Open-Meteo API](https://img.shields.io/badge/API-Open--Meteo%20Weather-skyblue.svg)](https://open-meteo.com/)
+[![PuLP Solver](https://img.shields.io/badge/Solver-PuLP%20MILP-purple.svg)](https://coin-or.github.io/pulp/)
 
 [Research Context](#research-context) • [Purpose and Scope](#purpose-and-scope) • [Main Functions](#main-functions) • [Architecture](#architecture) • [Quick Start](#quick-start) • [License](#license)
 
