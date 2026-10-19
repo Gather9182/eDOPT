@@ -16,7 +16,7 @@ export default function ChargingSitesEditor({ projectData, setProjectData, nodes
   const addDepotNodes = selected => update({ sites: addSelectedDepotSites(sites, selected, suggestions, create) });
   return <div className="card p-6">
     <h2 className="text-lg font-bold mb-3">Ladeorte und Umstecksperren</h2>
-    <label className="flex items-center gap-2 mb-3"><input type="checkbox" checked={config.enabled} onChange={e => update({ enabled: e.target.checked })} /> Ladeorte getrennt berücksichtigen</label>
+    <label className="flex items-center gap-2 mb-3"><input type="checkbox" checked={Boolean(config.enabled)} onChange={e => update({ enabled: e.target.checked })} /> Ladeorte getrennt berücksichtigen</label>
     <p className="text-sm text-muted mb-4">Ordne Fahrplanknoten einem physischen Ladeort zu. Einfahrt und Ausfahrt desselben Depots gehören zum selben Ort. Mit „Continue to Settings“ werden die aktuellen Knotenzuordnungen automatisch verarbeitet und übernommen.</p>
     {config.enabled && <>
       <p className="text-sm mb-4">Die bisherigen Gesamtgrenzen für Netz- und Ladeleistung gelten zusätzlich für die gesamte Flotte. Ladepunktzahlen gelten je Ort.</p>
