@@ -1,5 +1,30 @@
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
+from pydantic import field_validator
+
+
+class SwitchingWindow(BaseModel):
+    start: str
+    end: str
+
+    @field_validator('start', 'end')
+    @classmethod
+    def valid_clock(cls, value):
+        import datetime
+        datetime.datetime.strptime(value, '%H:%M')
+        return value
+
+
+class ChargingSite(BaseModel):
+    id: str = Field(min_length=1)
+    name: str = ''
+    nodes: List[str] = Field(default_factory=list)
+    num_chargers: int = Field(1, ge=0)
+    charger_power_kw: float = Field(150, ge=0)
+    charger_capacity_kw: float = Field(150, ge=0)
+    grid_limit_kw: float = Field(150, ge=0)
+    no_switch_windows: List[SwitchingWindow] = Field(default_factory=list)
+    allow_connect_on_arrival: bool = True
 
 class BusUmlauf(BaseModel):
     id: str = Field(..., description="Unique identifier for the bus trip / Umlauf (I)")
@@ -18,6 +43,12 @@ class BusUmlauf(BaseModel):
     # Optional summary field
     energy_demand_kwh: Optional[float] = Field(None, description="Total energy demand for summary purposes")
     trips: List[Dict] = Field(default_factory=list, description="Chronological sequence of individual trip segments")
+    site_availability: Dict[str, List[int]] = Field(default_factory=dict)
+    # Includes short boundary slots: occupancy cannot be released before actual departure.
+    site_presence: Dict[str, List[int]] = Field(default_factory=dict)
+    site_arrivals: Dict[str, List[int]] = Field(default_factory=dict)
+    site_nodes: Dict[str, List[str]] = Field(default_factory=dict)
+    initial_connection_site: Optional[str] = None
 
 class PVConfig(BaseModel):
     capacity_kw: float = Field(0.0, description="Installed PV capacity")
@@ -54,7 +85,7 @@ class BESSConfig(BaseModel):
 class OptimizationInputs(BaseModel):
     scenario: str = Field("baseline", description="Scenario mode: baseline, pv, bess, pv_bess")
     planning_horizon_hours: int = Field(24, description="Total hours (T)")
-    time_step_minutes: int = Field(15, description="Duration of each discrete period (delta_t)")
+    time_step_minutes: int = Field(15, ge=1, le=1440, description="Duration of each discrete period (delta_t)")
     buses: List[BusUmlauf]
     electricity_prices: List[float] = Field(..., description="Effective Price per MWh (incl. markups) (p_t)")
     market_prices: List[float] = Field(default_factory=list, description="Original wholesale Market Price per MWh")
@@ -68,6 +99,11 @@ class OptimizationInputs(BaseModel):
     # PV and BESS extensions
     pv_config: Optional[PVConfig] = None
     bess_config: Optional[BESSConfig] = None
+    charging_sites: List[ChargingSite] = Field(default_factory=list)
+    use_charging_sites: bool = False
+    energy_site_id: Optional[str] = None
+    horizon_start_minute: int = 0
+    cyclic_connections: bool = True
 
 class BusDiagnostic(BaseModel):
     id: str
@@ -135,3 +171,10 @@ class OptimizationResult(BaseModel):
     optimization_gap: float
     status: str
     solver_logs: List[str] = Field(default_factory=list)
+    connection_schedules: Dict[str, List[str]] = Field(default_factory=dict)
+    final_connections: Dict[str, str] = Field(default_factory=dict)
+    site_load_profiles: Dict[str, List[float]] = Field(default_factory=dict)
+    site_grid_import_profiles: Dict[str, List[float]] = Field(default_factory=dict)
+    site_occupied_connectors: Dict[str, List[int]] = Field(default_factory=dict)
+    baseline_feasible: bool = True
+    baseline_issues: List[str] = Field(default_factory=list)

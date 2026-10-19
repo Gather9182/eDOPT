@@ -7,6 +7,7 @@ from ..models import BESSConfig
 
 class WeatherService:
     BASE_URL = "https://api.open-meteo.com/v1/forecast"
+    ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
     async def get_temperature_profile(
         self, 
@@ -20,6 +21,7 @@ class WeatherService:
         """
         Fetches ambient temperature (2m) from Open-Meteo and maps it to the optimization horizon.
         Returns a flat 25°C profile as fallback if fetch fails.
+        Automatically selects between Archive API and Forecast API based on date range.
         """
         def add_log(msg):
             if logs is not None:
@@ -38,28 +40,45 @@ class WeatherService:
         
         add_log(f"Fetching temperature for {latitude}, {longitude} ({ref_date} to {end_date})")
         
+        # Decide endpoints order based on target date
+        is_historical = end_date_obj < dt.date.today()
+        endpoints = [self.ARCHIVE_URL, self.BASE_URL] if is_historical else [self.BASE_URL, self.ARCHIVE_URL]
+
+        params = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "hourly": "temperature_2m",
+            "start_date": ref_date,
+            "end_date": end_date,
+            "timezone": "auto"
+        }
+
+        hourly_data = []
+        async with httpx.AsyncClient() as client:
+            for url in endpoints:
+                url_type = "Archive" if "archive" in url else "Forecast"
+                try:
+                    response = await client.get(url, params=params, timeout=15.0)
+                    if response.status_code == 200:
+                        data = response.json()
+                        raw_data = data.get("hourly", {}).get("temperature_2m", [])
+                        valid_points = [v for v in raw_data if v is not None]
+                        if valid_points:
+                            hourly_data = raw_data
+                            add_log(f"Successfully retrieved {len(hourly_data)} hourly temperature data points via {url_type} API.")
+                            break
+                        else:
+                            add_log(f"{url_type} API returned all-null values, attempting fallback...")
+                    else:
+                        add_log(f"{url_type} API returned status {response.status_code}, attempting fallback...")
+                except Exception as e:
+                    add_log(f"Error querying {url_type} API: {e}")
+
+        if not hourly_data or all(v is None for v in hourly_data):
+            add_log("Warning: Open-Meteo returned no valid hourly temperature data. Using fallback 25°C.")
+            return [25.0] * num_periods
+
         try:
-            params = {
-                "latitude": latitude,
-                "longitude": longitude,
-                "hourly": "temperature_2m",
-                "start_date": ref_date,
-                "end_date": end_date,
-                "timezone": "auto"
-            }
-
-            async with httpx.AsyncClient() as client:
-                response = await client.get(self.BASE_URL, params=params, timeout=10.0)
-                response.raise_for_status()
-                data = response.json()
-
-            hourly_data = data.get("hourly", {}).get("temperature_2m", [])
-            if not hourly_data:
-                add_log("Warning: Open-Meteo returned no hourly temperature data. Using fallback 25°C.")
-                return [25.0] * num_periods
-
-            add_log(f"Successfully retrieved {len(hourly_data)} hourly temperature data points.")
-
             # Create a time series for interpolation
             times = pd.date_range(start=ref_date, periods=len(hourly_data), freq='h')
             df = pd.DataFrame({"temp": hourly_data}, index=times)
@@ -77,17 +96,18 @@ class WeatherService:
             
             # Fill NaNs with cyclical/last-value fallback if horizon exceeds data
             if df_final["temp"].isna().any():
-                add_log("Forecast horizon exceeds data. Applying day-one pattern fallback...")
+                add_log("Forecast horizon exceeds data or has gaps. Applying day-one pattern fallback...")
                 periods_per_day = int(1440 / time_step_min)
                 first_day_pattern = df_final["temp"].iloc[:periods_per_day].values
                 for i, val in enumerate(df_final["temp"]):
                     if np.isnan(val):
-                        df_final.iloc[i, 0] = first_day_pattern[i % len(first_day_pattern)]
+                        fallback_val = first_day_pattern[i % len(first_day_pattern)]
+                        df_final.iloc[i, 0] = fallback_val if not np.isnan(fallback_val) else 25.0
 
             return df_final["temp"].fillna(25.0).tolist()
 
         except Exception as e:
-            add_log(f"Error fetching Open-Meteo temperature data: {e}. Using fallback 25°C.")
+            add_log(f"Error processing Open-Meteo temperature data: {e}. Using fallback 25°C.")
             return [25.0] * num_periods
 
     async def get_historical_temperature_profile(

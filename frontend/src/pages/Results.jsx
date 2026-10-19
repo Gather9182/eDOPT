@@ -9,6 +9,8 @@ import {
   MapPin, ArrowRight, ArrowLeft, Loader2, Maximize, Sun, CloudSun, Thermometer, ShieldCheck, Leaf, X, GitCompare, LayoutDashboard, PiggyBank, Calendar
 } from 'lucide-react';
 import { getItem, setItem } from '../utils/db';
+import ChargingSiteResults from '../components/ChargingSiteResults';
+import ExcludedRoutesNotice from '../components/ExcludedRoutesNotice';
 
 const toMinutesForSort = (hhmm) => {
   if (!hhmm) return 0;
@@ -2196,7 +2198,7 @@ const Results = () => {
 
 
 
-  const showGlobalComparison = !results.is_long_term || !isDrillDown;
+  const showGlobalComparison = results.baseline_feasible !== false && (!results.is_long_term || !isDrillDown);
   const stats = [
     { 
       label: isDrillDown ? (results.is_long_term ? `Energy Import (Day ${Number(selectedDay) + 1})` : 'Energy Import') : 'Total Energy Import', 
@@ -2231,7 +2233,7 @@ const Results = () => {
 
   stats.push({
     label: isDrillDown ? (results.is_long_term ? `Daily CO2 Savings (Day ${Number(selectedDay) + 1})` : 'CO2 Emission Savings') : 'CO2 Emission Savings',
-    value: `${co2SavedVal.toFixed(3)} t CO2`,
+    value: results.baseline_feasible === false ? 'n.a.' : `${co2SavedVal.toFixed(3)} t CO2`,
     icon: <Leaf size={18} className="text-emerald-500" />,
     desc: isDrillDown 
       ? 'The amount of CO2 emissions saved on this specific day compared to the baseline load profile.' 
@@ -2260,7 +2262,7 @@ const Results = () => {
 
     stats.push({
       label: 'Total Net Savings',
-      value: `€${(totalBaselineCost - totalOptimizedCost).toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
+      value: results.baseline_feasible === false ? 'n.a.' : `€${(totalBaselineCost - totalOptimizedCost).toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
       icon: <PiggyBank size={18} className="text-indigo-500" />,
       desc: 'Net financial benefit compared to the charge-on-arrival baseline across the full period.'
     });
@@ -2714,6 +2716,8 @@ const Results = () => {
         )}
       </div>
       
+      <ExcludedRoutesNotice ids={results.run_metadata?.excluded_bus_ids} />
+      <ChargingSiteResults results={results} day={results.is_long_term && isDrillDown ? selectedDay : null} />
       {results.storage_pruned && (
         <div className="bg-warning/10 border border-warning/20 rounded-2xl p-4 mb-8 animate-in slide-in-from-top-2 duration-500">
           <div className="flex items-start gap-3">

@@ -7,6 +7,7 @@ from ..models import PVConfig
 
 class PVService:
     BASE_URL = "https://api.open-meteo.com/v1/forecast"
+    ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
     async def get_profile(
         self, 
@@ -18,6 +19,7 @@ class PVService:
         """
         Fetches PV radiation data from Open-Meteo and maps it to the optimization horizon.
         Scales the radiation profile such that the daily peak corresponds to capacity_kw.
+        Automatically selects between Archive API and Forecast API based on date range.
         """
         if config.profile_mode != "open_meteo" or config.latitude is None or config.longitude is None:
             return []
@@ -34,28 +36,45 @@ class PVService:
         
         add_log(f"Fetching PV radiation for {config.latitude}, {config.longitude} ({ref_date} to {end_date})")
         
+        # Decide endpoints order based on target date
+        is_historical = end_date_obj < dt.date.today()
+        endpoints = [self.ARCHIVE_URL, self.BASE_URL] if is_historical else [self.BASE_URL, self.ARCHIVE_URL]
+
+        params = {
+            "latitude": config.latitude,
+            "longitude": config.longitude,
+            "hourly": "shortwave_radiation",
+            "start_date": ref_date,
+            "end_date": end_date,
+            "timezone": "auto"
+        }
+
+        hourly_data = []
+        async with httpx.AsyncClient() as client:
+            for url in endpoints:
+                url_type = "Archive" if "archive" in url else "Forecast"
+                try:
+                    response = await client.get(url, params=params, timeout=15.0)
+                    if response.status_code == 200:
+                        data = response.json()
+                        raw_data = data.get("hourly", {}).get("shortwave_radiation", [])
+                        valid_points = [v for v in raw_data if v is not None]
+                        if valid_points:
+                            hourly_data = raw_data
+                            add_log(f"Successfully retrieved {len(hourly_data)} hourly radiation data points via {url_type} API.")
+                            break
+                        else:
+                            add_log(f"{url_type} API returned all-null values, attempting fallback...")
+                    else:
+                        add_log(f"{url_type} API returned status {response.status_code}, attempting fallback...")
+                except Exception as e:
+                    add_log(f"Error querying {url_type} API: {e}")
+
+        if not hourly_data or all(v is None for v in hourly_data):
+            add_log("Warning: Open-Meteo returned no valid hourly data. Falling back to default profile.")
+            return []
+
         try:
-            params = {
-                "latitude": config.latitude,
-                "longitude": config.longitude,
-                "hourly": "shortwave_radiation",
-                "start_date": ref_date,
-                "end_date": end_date,
-                "timezone": "auto"
-            }
-
-            async with httpx.AsyncClient() as client:
-                response = await client.get(self.BASE_URL, params=params, timeout=10.0)
-                response.raise_for_status()
-                data = response.json()
-
-            hourly_data = data.get("hourly", {}).get("shortwave_radiation", [])
-            if not hourly_data:
-                add_log("Warning: Open-Meteo returned no hourly data.")
-                return []
-
-            add_log(f"Successfully retrieved {len(hourly_data)} hourly radiation data points.")
-
             # Create a time series for interpolation
             times = pd.date_range(start=ref_date, periods=len(hourly_data), freq='h')
             df = pd.DataFrame({"radiation": hourly_data}, index=times)
@@ -72,12 +91,13 @@ class PVService:
             df_final = df_interp.reindex(target_index)
             
             if df_final["radiation"].isna().any():
-                add_log("Forecast horizon exceeds data. Applying cyclical day-one pattern fallback...")
+                add_log("Forecast horizon exceeds data or has gaps. Applying cyclical day-one pattern fallback...")
                 periods_per_day = int(1440 / time_step_min)
                 first_day_pattern = df_final["radiation"].iloc[:periods_per_day].values
                 for i, val in enumerate(df_final["radiation"]):
                     if np.isnan(val):
-                        df_final.iloc[i, 0] = first_day_pattern[i % len(first_day_pattern)]
+                        fallback_val = first_day_pattern[i % len(first_day_pattern)]
+                        df_final.iloc[i, 0] = fallback_val if not np.isnan(fallback_val) else 0.0
 
             # Normalize: Global max radiation across all requested days mapped to capacity_kw
             max_rad = df_final["radiation"].max()
@@ -91,7 +111,7 @@ class PVService:
             return result_profile.fillna(0.0).tolist()
 
         except Exception as e:
-            add_log(f"Error fetching Open-Meteo PV data: {e}")
+            add_log(f"Error processing Open-Meteo PV data: {e}")
             return []
 
     async def get_historical_profile(

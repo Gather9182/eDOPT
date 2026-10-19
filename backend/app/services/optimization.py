@@ -4,6 +4,7 @@ from ..models import OptimizationInputs, OptimizationResult, BusDiagnostic, PVCo
 from .solver import run_milp_solver, run_scenario_optimization, update_cell_temperature, capacity_factor_from_cell_temp
 from .pv_service import PVService
 from .weather_service import WeatherService
+from .feasibility import energy_feasibility_issues
 
 async def run_optimization(inputs: OptimizationInputs) -> OptimizationResult:
     """
@@ -11,12 +12,22 @@ async def run_optimization(inputs: OptimizationInputs) -> OptimizationResult:
     Routes to the scenario-aware MILP solver.
     """
     solver_logs = []
+    energy_issues = energy_feasibility_issues(inputs) if inputs.charging_sites else []
+    if energy_issues:
+        raise RuntimeError('Kein zulässiger Ladeplan: ' + '\n'.join(issue['message'] for issue in energy_issues))
     try:
         res = await run_scenario_optimization(inputs, solver_logs)
         res.solver_logs = solver_logs
         return res
     except Exception as e:
         err_str = str(e)
+        if inputs.charging_sites or inputs.use_charging_sites:
+            # The legacy fallback has no physical connection model. Never
+            # return an apparently feasible schedule that ignores site locks.
+            raise RuntimeError(f'Kein zulässiger Ladeplan für die aktuellen Ladeorte und Umstecksperren: {err_str}. '
+                               'Der Ausschluss von Umläufen ohne Ladefenster garantiert noch keine machbare Lösung. '
+                               'Auch bei ausreichender Energie je Bus können gemeinsame Ladepunkte, Lade- und Netzleistung '
+                               'oder Umstecksperren die Flotte begrenzen. Die globalen Leistungsgrenzen gelten zusätzlich zu den Standortgrenzen.') from e
         print(f"Solver failed: {err_str}. Falling back to heuristic.")
         res = await run_placeholder_optimization(inputs, solver_logs, error_msg=err_str)
         res.solver_logs = solver_logs

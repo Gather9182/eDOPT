@@ -6,9 +6,10 @@ const api = axios.create({
   baseURL: API_BASE,
 });
 
-export const preScanExcel = async (file) => {
+export const preScanExcel = async (file, sheetName = null) => {
   const formData = new FormData();
   formData.append('file', file);
+  if (sheetName) formData.append('sheet_name', sheetName);
   const response = await api.post('/data/pre-scan-excel', formData, {
     headers: { 'Content-Type': 'multipart/form-data' }
   });

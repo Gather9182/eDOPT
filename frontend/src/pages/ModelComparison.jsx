@@ -145,11 +145,14 @@ const ModelComparison = () => {
       cost: totalOptimizedCost,
       baselineCost: totalBaselineCost,
       savings: savingsPercent,
+      baselineFeasible: run.baseline_feasible !== false,
       energy: energyImport,
       pvSufficiency: pvSufficiency,
       pvUsed: pvUsed,
       bessThroughput: bessThroughput,
       activeVehicles: `${uniqueBusesCharged}/${totalBuses}`,
+      fleetSize: totalBuses,
+      excludedIds: run.run_metadata?.excluded_bus_ids || [],
       peakLoad: peakLoad,
       avgCost: avgCost
     };
@@ -293,6 +296,10 @@ const ModelComparison = () => {
               </tr>
             </thead>
             <tbody>
+              <tr>
+                <td className="font-bold">Umläufe berücksichtigt / ausgeschlossen</td>
+                {kpis.map((kpi, idx) => <td key={idx} className="text-center" title={kpi.excludedIds.join(', ')}>{kpi.fleetSize} / {kpi.excludedIds.length}</td>)}
+              </tr>
               <tr className="hover:bg-primary/5 transition-colors">
                 <td className="font-bold flex items-center gap-2"><DollarSign size={14} className="text-success"/> Total Procurement Cost</td>
                 {kpis.map((kpi, idx) => (
@@ -302,7 +309,7 @@ const ModelComparison = () => {
               <tr className="hover:bg-primary/5 transition-colors">
                 <td className="font-bold flex items-center gap-2"><TrendingDown size={14} className="text-primary"/> OPEX Savings (vs Baseline)</td>
                 {kpis.map((kpi, idx) => (
-                  <td key={idx} className="text-center font-bold text-primary">-{(Number(kpi.savings) || 0).toFixed(1)}%</td>
+                  <td key={idx} className="text-center font-bold text-primary" title={kpi.baselineFeasible ? '' : 'Charge-on-arrival does not meet all operating requirements'}>{kpi.baselineFeasible ? `-${(Number(kpi.savings) || 0).toFixed(1)}%` : 'n.a.'}</td>
                 ))}
               </tr>
               <tr className="hover:bg-primary/5 transition-colors">

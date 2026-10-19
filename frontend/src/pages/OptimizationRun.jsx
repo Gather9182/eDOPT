@@ -2,7 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Play, Zap, Terminal, Battery, Clock, CheckCircle, AlertCircle, Loader2, Table as TableIcon, Info, Save, ChevronDown, ChevronUp, Sun, Layers, LayoutDashboard, Activity, Sliders, MapPin, Navigation } from 'lucide-react';
 import { runOptimization as callOptimizeApi, validateInputs } from '../services/api';
 import { generateDefaultPrices } from '../utils/dataMapping';
-import { getItem, setItem, removeItem } from '../utils/db';
+import { setItem } from '../utils/db';
+import { chargingInputs, locationProfilesForHorizon } from '../utils/charging';
+import { optimizationFleet, excludableBusIds, fleetRunMetadata } from '../utils/optimizationFleet';
+import ExcludedRoutesNotice from '../components/ExcludedRoutesNotice';
 
 const InfoTooltip = ({ title, text, align = 'center' }) => (
   <div className="tooltip-container">
@@ -65,12 +68,23 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     num_chargers: projectData.constraints?.num_chargers || 50,
     use_next_day_readiness: projectData.constraints?.use_next_day_readiness ?? true
   });
-  const [validationResult, setValidationResult] = useState(null);
+  const [validationState, setValidationState] = useState(null);
+  const [optimizationError, setOptimizationError] = useState(null);
+  const validationVersionRef = useRef(0);
   const [isValidating, setIsValidating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState('idle'); // idle, saved
   const [showInputData, setShowInputData] = useState(false);
   const [showCompareAllToast, setShowCompareAllToast] = useState(false);
+  const { included: activeBuses, excluded: excludedBuses } = optimizationFleet(projectData);
+  // A check applies only to the fleet and settings that were actually checked.
+  const validationKeyFor = buses => JSON.stringify({ buses, localSettings, scenario, pvConfig, bessConfig, weatherDate,
+    charging: chargingInputs(projectData), pricing: projectData.pricing,
+    initialSoc: projectData.meta.initial_soc_fraction, reserve: projectData.meta.min_final_soc_fraction,
+    sourceStep: projectData.meta.time_resolution, latitude: projectData.meta.latitude, longitude: projectData.meta.longitude });
+  const validationResult = validationState?.key === validationKeyFor(activeBuses) ? validationState.result : null;
+  const excludableIds = excludableBusIds(validationResult, activeBuses);
+  const noActiveBuses = projectData.buses.length > 0 && !activeBuses.length;
 
   // New states for Long-Term Simulation
   const [simulationMode, setSimulationMode] = useState('single'); // 'single', 'long_term'
@@ -224,7 +238,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
 
     let finalPrices = [];
     if (isRealData) {
-      addLog(`Using uploaded data for ${projectData.buses.length} buses.`);
+      addLog(`Using uploaded data for ${activeBuses.length} buses.`);
+      if (excludedBuses.length) addLog(`Excluded routes: ${excludedBuses.map(bus => bus.id).join(', ')}`);
       const priceAssumptions = projectData.meta.price_assumptions || {
         supplier_markup: 10,
         variable_network_charge: 15,
@@ -259,11 +274,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       if (isRealData) {
         return {
           scenario: targetScenario,
+          ...chargingInputs(projectData),
           planning_horizon_hours: localSettings.planning_horizon,
           time_step_minutes: localSettings.time_resolution,
-          buses: projectData.buses.map(bus => {
-            const initFrac = projectData.meta.initial_soc_fraction || 1.0;
-            const reserveFrac = projectData.meta.min_final_soc_fraction || 0.2;
+          buses: activeBuses.map(bus => {
+            const initFrac = projectData.meta.initial_soc_fraction ?? 1.0;
+            const reserveFrac = projectData.meta.min_final_soc_fraction ?? 0.2;
             const battery = bus.max_battery_capacity_kwh || projectData.constraints.max_battery_capacity_kwh || 350;
             return {
               ...bus,
@@ -272,15 +288,16 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
               efficiency: bus.efficiency || localSettings.efficiency,
               max_power_kw: bus.max_power_kw || localSettings.max_power_per_bus,
               availability: tileVector(bus.availability, numPeriods),
-              trip_energy_profile_kwh: tileVector(bus.trip_energy_profile_kwh, numPeriods)
+              trip_energy_profile_kwh: tileVector(bus.trip_energy_profile_kwh, numPeriods),
+              ...locationProfilesForHorizon(bus, numPeriods, localSettings.time_resolution, projectData.meta.time_resolution)
             };
           }),
           electricity_prices: tileVector(finalPrices, numPeriods),
           market_prices: tileVector(projectData.pricing, numPeriods),
           charger_capacity_kw: localSettings.charger_capacity_kw,
           grid_limit_kw: localSettings.grid_limit_kw,
-          initial_soc_fraction: projectData.meta.initial_soc_fraction || 1.0,
-          min_final_soc_fraction: projectData.meta.min_final_soc_fraction || 0.2,
+          initial_soc_fraction: projectData.meta.initial_soc_fraction ?? 1.0,
+          min_final_soc_fraction: projectData.meta.min_final_soc_fraction ?? 0.2,
           num_chargers: localSettings.num_chargers || 50,
           use_next_day_readiness: localSettings.use_next_day_readiness,
           pv_config: (targetScenario === 'pv' || targetScenario === 'pv_bess') ? {
@@ -342,6 +359,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           const snapshot = {
             ...result,
             run_metadata: {
+              ...fleetRunMetadata(projectData),
               inputs: JSON.parse(JSON.stringify(inputs)),
               timestamp: new Date().toISOString(),
               run_id: `${new Date().toISOString().split('T')[0]}_BATCH_${s.toUpperCase()}`
@@ -380,6 +398,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         const snapshot = {
           ...result,
           run_metadata: {
+            ...fleetRunMetadata(projectData),
             inputs: JSON.parse(JSON.stringify(inputs)),
             timestamp: new Date().toISOString(),
             run_id: `${new Date().toISOString().split('T')[0]}_${Math.random().toString(36).substr(2, 5).toUpperCase()}`
@@ -392,11 +411,14 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     } catch (err) {
       addLog(`Error: ${err.message}`);
       setStatus('ready');
-      alert(`Optimization failed: ${err.response?.data?.detail || err.message}`);
+      const detail = err.response?.data?.detail || err.message;
+      setOptimizationError(typeof detail === 'string' ? detail : JSON.stringify(detail));
     }
   };
 
   const executeSimulation = async () => {
+    if (noActiveBuses || isValidating || !validationResult || validationResult.status === 'invalid') return;
+    setOptimizationError(null);
     if (simulationMode === 'single') {
       await runOptimization();
     } else {
@@ -410,6 +432,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     setProgress(2);
     setLogs([]);
     addLog(`Starting Long-Term Simulation from ${longTermConfig.startDate} to ${longTermConfig.endDate}`);
+    if (excludedBuses.length) addLog(`Excluded routes: ${excludedBuses.map(bus => bus.id).join(', ')}`);
 
     try {
       // 1. Fetch Historical Context
@@ -447,9 +470,10 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       
       let currentBessSoc = bessConfig.initial_soc_kwh;
       let currentBusSocs = {};
-      if (projectData.buses) {
-         projectData.buses.forEach(b => {
-             const initFrac = projectData.meta.initial_soc_fraction || 1.0;
+      let currentConnections = {};
+      if (activeBuses.length) {
+         activeBuses.forEach(b => {
+             const initFrac = projectData.meta.initial_soc_fraction ?? 1.0;
              const battery = b.max_battery_capacity_kwh || projectData.constraints.max_battery_capacity_kwh || 350;
              currentBusSocs[b.id] = battery * initFrac;
          });
@@ -479,6 +503,9 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       let agg_diagnostics = [];
       let agg_schedules = [];
       let agg_soc_profiles = [];
+      const aggConnections = {}, aggSiteLoads = {}, aggSiteGrids = {}, aggOccupied = {};
+      const baselineIssues = new Set();
+      const appendProfiles = (target, source) => Object.entries(source || {}).forEach(([key, values]) => { (target[key] ||= []).push(...values); });
       let totalCost = 0;
       let totalBaselineCost = 0;
       let totalBasicOptimizedCost = 0;
@@ -492,7 +519,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       // 3. Loop over chunks
       for (let i = 0; i < chunks; i++) {
         const startIdx = i * periodsPerChunk;
-        const endIdx = (i + 1) * periodsPerChunk;
+        const endIdx = Math.min((i + 1) * periodsPerChunk, totalDays * periodsPerDay);
+        const chunkPeriods = endIdx - startIdx;
         
         // Ensure data availability for this chunk, pad with last values if needed
         const getPaddedSlice = (arr, start, end) => {
@@ -523,10 +551,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         const buildInputs = () => {
           return {
             scenario: scenario,
-            planning_horizon_hours: longTermConfig.chunkSizeHours,
+            ...chargingInputs(projectData),
+            cyclic_connections: false,
+            planning_horizon_hours: chunkPeriods * localSettings.time_resolution / 60,
             time_step_minutes: localSettings.time_resolution,
-            buses: (projectData.buses || []).map(bus => {
-              const reserveFrac = projectData.meta.min_final_soc_fraction || 0.2;
+            buses: activeBuses.map(bus => {
+              const reserveFrac = projectData.meta.min_final_soc_fraction ?? 0.2;
               const battery = bus.max_battery_capacity_kwh || projectData.constraints.max_battery_capacity_kwh || 350;
               return {
                 ...bus,
@@ -534,8 +564,10 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                 min_final_soc_kwh: battery * reserveFrac,
                 efficiency: bus.efficiency || localSettings.efficiency,
                 max_power_kw: bus.max_power_kw || localSettings.max_power_per_bus,
-                availability: tileVector(bus.availability, periodsPerChunk),
-                trip_energy_profile_kwh: tileVector(bus.trip_energy_profile_kwh, periodsPerChunk)
+                availability: tileVector(bus.availability, chunkPeriods),
+                trip_energy_profile_kwh: tileVector(bus.trip_energy_profile_kwh, chunkPeriods),
+                ...locationProfilesForHorizon(bus, chunkPeriods, localSettings.time_resolution, projectData.meta.time_resolution),
+                initial_connection_site: currentConnections[bus.id] ?? null
               };
             }),
             electricity_prices: chunkPrices,
@@ -561,6 +593,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         };
 
         const res = await callOptimizeApi(buildInputs());
+        currentConnections = res.final_connections || {};
+        appendProfiles(aggConnections, res.connection_schedules);
+        appendProfiles(aggSiteLoads, res.site_load_profiles);
+        appendProfiles(aggSiteGrids, res.site_grid_import_profiles);
+        appendProfiles(aggOccupied, res.site_occupied_connectors);
+        (res.baseline_issues || []).forEach(issue => baselineIssues.add(issue));
         
         // Extract states for next chunk
         if (res.bess_soc_profile && res.bess_soc_profile.length > 0) {
@@ -579,7 +617,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         agg_baseline_load.push(...(res.baseline_aggregated_load_profile || []));
         agg_bess_charge.push(...(res.bess_charge_profile || []));
         agg_bess_discharge.push(...(res.bess_discharge_profile || []));
-        agg_bess_soc.push(...(res.bess_soc_profile || []).slice(0, periodsPerChunk)); // Drop the N+1 element
+        agg_bess_soc.push(...(res.bess_soc_profile || []).slice(0, chunkPeriods)); // Drop the N+1 element
         agg_bess_charge_from_pv.push(...(res.bess_charge_from_pv_profile || []));
         agg_bess_charge_from_grid.push(...(res.bess_charge_from_grid_profile || []));
         agg_pv_yield.push(...(res.pv_yield_profile || []));
@@ -631,7 +669,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
               const busSoc = dailySoc[busId] || [];
               const busSch = dailySchedule[busId] || [];
               
-              const busInput = (projectData.buses || []).find(b => String(b.id) === String(busId));
+              const busInput = activeBuses.find(b => String(b.id) === String(busId));
               const battery = busInput?.max_battery_capacity_kwh || projectData.constraints?.max_battery_capacity_kwh || 350;
               const efficiency = busInput?.efficiency || localSettings.efficiency || 0.92;
               
@@ -701,6 +739,13 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
 
       // 4. Construct flat payload matching standard format
       const finalPayload = {
+        connection_schedules: aggConnections,
+        final_connections: currentConnections,
+        site_load_profiles: aggSiteLoads,
+        site_grid_import_profiles: aggSiteGrids,
+        site_occupied_connectors: aggOccupied,
+        baseline_feasible: baselineIssues.size === 0,
+        baseline_issues: [...baselineIssues],
         scenario: scenario,
         total_cost_eur: totalCost,
         baseline_cost_eur: totalBaselineCost,
@@ -737,18 +782,20 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         is_long_term: true,
         total_days: totalDays,
         run_metadata: {
+            ...fleetRunMetadata(projectData),
             timestamp: new Date().toISOString(),
             scenario: scenario,
             is_long_term: true,
             duration_days: totalDays,
             settings: { ...localSettings, longTermConfig },
             inputs: {
+                ...chargingInputs(projectData),
                 grid_limit_kw: localSettings.grid_limit_kw,
                 num_chargers: localSettings.num_chargers,
                 initial_soc_fraction: 1.0,
                 min_final_soc_fraction: 0.2,
                 time_step_minutes: localSettings.time_resolution,
-                buses: projectData.buses || [],
+                buses: activeBuses,
                 pv_config: pvConfig,
                 bess_config: bessConfig,
                 start_date: longTermConfig.startDate,
@@ -781,7 +828,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             localStorage.setItem('optimization_results', JSON.stringify(prunedPayload));
             addLog('Successfully saved pruned version to localStorage.');
             onComplete('results');
-          } catch (e3) {
+          } catch {
             addLog('Critical Error: Could not save results. Storage failed.');
           }
         }
@@ -789,23 +836,35 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
 
     } catch (error) {
       addLog(`Long-Term Error: ${error.message}`);
+      const detail = error.response?.data?.detail || error.message;
+      setOptimizationError(typeof detail === 'string' ? detail : JSON.stringify(detail));
       setStatus('ready');
       setProgress(0);
     }
   };
 
-  const handleValidation = async () => {
+  const handleValidation = async (busesToValidate = activeBuses) => {
+    const version = ++validationVersionRef.current;
+    const key = validationKeyFor(busesToValidate);
+    setValidationState(null);
+    setOptimizationError(null);
     setIsValidating(true);
     addLog('Starting plausibility check...');
+    if (projectData.buses.length && !busesToValidate.length) {
+      setValidationState({ key, result: { status: 'invalid', issues: [{ type: 'ERROR', message: 'Es muss mindestens ein Umlauf für die Optimierung eingeschlossen sein.' }] } });
+      setIsValidating(false);
+      return;
+    }
     
     const numPeriods = (localSettings.planning_horizon * 60) / localSettings.time_resolution;
     const inputs = {
       scenario: scenario,
+      ...chargingInputs(projectData),
       planning_horizon_hours: localSettings.planning_horizon,
       time_step_minutes: localSettings.time_resolution,
-      buses: projectData.buses.length > 0 ? projectData.buses.map(bus => {
-          const initFrac = projectData.meta.initial_soc_fraction || 1.0;
-          const reserveFrac = projectData.meta.min_final_soc_fraction || 0.2;
+      buses: busesToValidate.map(bus => {
+          const initFrac = projectData.meta.initial_soc_fraction ?? 1.0;
+          const reserveFrac = projectData.meta.min_final_soc_fraction ?? 0.2;
           const battery = bus.max_battery_capacity_kwh || projectData.constraints.max_battery_capacity_kwh || 350;
           
           return {
@@ -816,9 +875,10 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             max_power_kw: bus.max_power_kw || localSettings.max_power_per_bus,
             consumption_wh_m: bus.consumption_wh_m || localSettings.consumption_wh_m,
             availability: tileVector(bus.availability, numPeriods),
-            trip_energy_profile_kwh: tileVector(bus.trip_energy_profile_kwh, numPeriods)
+            trip_energy_profile_kwh: tileVector(bus.trip_energy_profile_kwh, numPeriods),
+            ...locationProfilesForHorizon(bus, numPeriods, localSettings.time_resolution, projectData.meta.time_resolution)
           };
-      }) : [],
+      }),
       electricity_prices: tileVector(projectData.pricing, numPeriods),
       charger_capacity_kw: localSettings.charger_capacity_kw,
       grid_limit_kw: localSettings.grid_limit_kw,
@@ -837,7 +897,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
 
     try {
       const result = await validateInputs(inputs);
-      setValidationResult(result);
+      if (version !== validationVersionRef.current) return;
+      setValidationState({ key, result });
       if (result.status === 'valid') {
         addLog('Plausibility check passed: Data is consistent.');
       } else {
@@ -846,8 +907,26 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     } catch (err) {
       addLog(`Validation Error: ${err.message}`);
     } finally {
-      setIsValidating(false);
+      if (version === validationVersionRef.current) setIsValidating(false);
     }
+  };
+
+  const handleExcludeUnavailable = async () => {
+    if (isValidating || !excludableIds.length) return;
+    const remaining = activeBuses.filter(bus => !excludableIds.includes(String(bus.id)));
+    if (!remaining.length) return;
+    setProjectData(prev => ({ ...prev, meta: { ...prev.meta,
+      excluded_bus_ids: [...new Set([...(prev.meta.excluded_bus_ids || []).map(String), ...excludableIds])],
+    } }));
+    addLog(`Excluding ${excludableIds.length} routes with missing availability or infeasible energy requirements: ${excludableIds.join(', ')}`);
+    await handleValidation(remaining);
+  };
+
+  const handleRestoreExcluded = () => {
+    ++validationVersionRef.current;
+    setValidationState(null);
+    setIsValidating(false);
+    setProjectData(prev => ({ ...prev, meta: { ...prev.meta, excluded_bus_ids: [] } }));
   };
 
   const handleSave = async () => {
@@ -907,6 +986,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
 
       {status === 'ready' && (
         <div className="animate-in">
+          <ExcludedRoutesNotice ids={excludedBuses.map(bus => String(bus.id))} onRestore={handleRestoreExcluded} disabled={isValidating} />
+          {optimizationError && <div className="card mb-6" role="alert" style={{ borderColor: 'var(--warning)' }}>
+            <h3 className="font-bold mb-2">Optimierung konnte keinen gültigen Ladeplan berechnen</h3>
+            <p className="text-sm" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{optimizationError}</p>
+            <p className="text-sm mt-3">Mit „Run Check“ kannst du die Energieanforderungen der verbleibenden Umläufe erneut prüfen. Ladefenster allein garantieren keine ausreichende Ladung.</p>
+          </div>}
           <div className="grid grid-cols-4 gap-6 mb-8">
             <div className="card stat-card shadow-sm">
                <div className="stat-info w-full">
@@ -935,7 +1020,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                       align="right"
                     />
                   </div>
-                  <div className="stat-value text-primary">{projectData.buses.length || 0} <span className="text-xs text-muted font-normal ml-1">Umläufe</span></div>
+                  <div className="stat-value text-primary">{activeBuses.length} <span className="text-xs text-muted font-normal ml-1">{activeBuses.length === 1 ? 'Umlauf' : 'Umläufe'}{excludedBuses.length > 0 ? ` (${excludedBuses.length} ausgeschlossen)` : ''}</span></div>
                </div>
             </div>
 
@@ -950,7 +1035,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                     />
                   </div>
                   <div className="stat-value text-primary">
-                    {Math.round(projectData.buses.reduce((acc, b) => acc + (b.energy_demand_kwh || 0), 0)).toLocaleString()} <span className="text-xs text-muted font-normal ml-1">kWh</span>
+                    {Math.round(activeBuses.reduce((acc, b) => acc + (b.energy_demand_kwh || 0), 0)).toLocaleString()} <span className="text-xs text-muted font-normal ml-1">kWh</span>
                   </div>
                </div>
             </div>
@@ -1838,13 +1923,20 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                     ))}
                   </ul>
                 )}
+                {excludableIds.length > 0 && <div className="mt-4">
+                  <p className="text-sm mb-3">Für {excludableIds.length} {excludableIds.length === 1 ? 'Umlauf' : 'Umläufe'} wurden fehlende Ladefenster oder nicht erfüllbare Energieanforderungen erkannt. Du kannst {excludableIds.length === 1 ? 'ihn' : 'sie'} ausschließen und mit den übrigen Umläufen fortfahren.</p>
+                  <button className="btn btn-outline" onClick={handleExcludeUnavailable} disabled={isValidating || excludableIds.length >= activeBuses.length}>
+                    Ignore and continue without these routes ({excludableIds.length})
+                  </button>
+                  {excludableIds.length >= activeBuses.length && <p className="text-sm mt-2">Es muss mindestens ein Umlauf übrig bleiben. Bitte zuerst Ladeorte oder Fahrplandaten korrigieren.</p>}
+                </div>}
               </div>
             )}
             
             <div className="flex items-center gap-4">
               <button 
                 className={`btn btn-outline px-6 h-11 ${isValidating ? 'opacity-50' : ''}`}
-                onClick={handleValidation}
+                onClick={() => handleValidation()}
                 disabled={isValidating}
               >
                 {isValidating ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
@@ -1863,7 +1955,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                 <button 
                 className={`btn btn-primary px-8 h-11 shadow-md ${(!validationResult || validationResult.status === 'invalid') ? 'opacity-50 grayscale' : ''}`}
                 onClick={executeSimulation}
-                disabled={!validationResult || validationResult.status === 'invalid'}
+                disabled={isValidating || noActiveBuses || !validationResult || validationResult.status === 'invalid'}
               >
                 <Zap size={18} /> {simulationMode === 'long_term' ? 'Run Simulation' : 'Run Optimization'}
               </button>

@@ -6,12 +6,15 @@ import numpy as np
 from ..models import OptimizationInputs, OptimizationResult, BusDiagnostic, PVConfig, BESSConfig
 from .pv_service import PVService
 from .weather_service import WeatherService
+from .charging_sites import add_site_constraints, site_results, validate_sites, simulate_site_baseline
 
 def simulate_baseline_load(inputs: OptimizationInputs) -> np.ndarray:
     """
     Simulates a 'Charge on Arrival' heuristic while respecting depot constraints.
     Used for comparing optimization results against a standard greedy strategy.
     """
+    if inputs.charging_sites:
+        return simulate_site_baseline(inputs)[0]
     num_periods = len(inputs.electricity_prices)
     delta_t = inputs.time_step_minutes / 60.0
     baseline_load = np.zeros(num_periods)
@@ -59,6 +62,7 @@ def simulate_baseline_load(inputs: OptimizationInputs) -> np.ndarray:
     return baseline_load
 
 def _validate_bus_inputs(inputs: OptimizationInputs):
+    validate_sites(inputs)
     num_periods = len(inputs.electricity_prices)
 
     for bus in inputs.buses:
@@ -191,14 +195,20 @@ async def run_scenario_optimization(inputs: OptimizationInputs, solver_logs: Lis
     # as requested: "if there is a bonus scenario involved additionally compare it to the 'basic' baseline optimization"
     basic_baseline_inputs = inputs.copy(deep=True)
     basic_baseline_inputs.scenario = "baseline"
-    basic_res = await run_milp_solver(basic_baseline_inputs)
+    try:
+        basic_res = await run_milp_solver(basic_baseline_inputs)
+    except RuntimeError:
+        if not inputs.charging_sites:
+            raise
+        basic_res = None
+        solver_logs.append('The grid-only comparison is infeasible for these locations. Solving the requested PV/BESS scenario independently.')
     
     # Now run the extended model
     solver_logs.append(f"[Solver] Routing to extended scenario solver (Scenario: {inputs.scenario}).")
     extended_res = await run_extended_milp_solver(inputs, solver_logs)
     
     # Inject the comparison metric
-    extended_res.basic_optimized_cost_eur = basic_res.total_cost_eur
+    extended_res.basic_optimized_cost_eur = basic_res.total_cost_eur if basic_res else None
     return extended_res
 
 
@@ -406,9 +416,11 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
         prob += (grid_import[t] <= inputs.grid_limit_kw)
         
         # Socket limits (Original bus charger constraints)
-        prob += (pulp.lpSum(z_vars[(bus.id, t)] for bus in inputs.buses) <= inputs.num_chargers)
+        if not inputs.charging_sites:
+            prob += (pulp.lpSum(z_vars[(bus.id, t)] for bus in inputs.buses) <= inputs.num_chargers)
         prob += (total_bus_p <= inputs.charger_capacity_kw)
 
+    site_state = add_site_constraints(prob, inputs, p_vars, grid_import, (pv_used, b_charge, b_discharge))
     # --- Solve ---
     solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=180)
     prob.solve(solver)
@@ -504,7 +516,11 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
             diagnostic_reason=reason
         ))
 
+    baseline_issues = simulate_site_baseline(inputs)[1] if inputs.charging_sites else []
     return OptimizationResult(
+        **site_results(inputs, site_state),
+        baseline_feasible=not baseline_issues,
+        baseline_issues=baseline_issues,
         scenario=inputs.scenario,
         total_cost_eur=round(float(total_cost), 2),
         total_energy_mwh=round(float(total_energy_kwh) / 1000.0, 3),
@@ -580,9 +596,11 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
 
     for t in range(num_periods):
         prob += (pulp.lpSum(p_vars[(bus.id, t)] for bus in inputs.buses) <= inputs.grid_limit_kw)
-        prob += (pulp.lpSum(z_vars[(bus.id, t)] for bus in inputs.buses) <= inputs.num_chargers)
+        if not inputs.charging_sites:
+            prob += (pulp.lpSum(z_vars[(bus.id, t)] for bus in inputs.buses) <= inputs.num_chargers)
         prob += (pulp.lpSum(p_vars[(bus.id, t)] for bus in inputs.buses) <= inputs.charger_capacity_kw)
 
+    site_state = add_site_constraints(prob, inputs, p_vars)
     solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=180)
     prob.solve(solver)
     status = pulp.LpStatus[prob.status]
@@ -630,7 +648,11 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
     baseline_load = simulate_baseline_load(inputs)
     baseline_cost = np.sum(baseline_load * np.array(inputs.electricity_prices) * delta_t / 1000.0)
 
+    baseline_issues = simulate_site_baseline(inputs)[1] if inputs.charging_sites else []
     return OptimizationResult(
+        **site_results(inputs, site_state),
+        baseline_feasible=not baseline_issues,
+        baseline_issues=baseline_issues,
         scenario=inputs.scenario,
         total_cost_eur=round(float(total_cost_eur), 2),
         total_energy_mwh=round(float(total_energy_kwh) / 1000.0, 3),

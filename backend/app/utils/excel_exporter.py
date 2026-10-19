@@ -20,9 +20,49 @@ class ExcelExporter:
                 ExcelExporter._write_long_term(writer, results)
             else:
                 ExcelExporter._write_single_horizon(writer, results)
+            ExcelExporter._write_charging_sites(writer, results)
                 
         output.seek(0)
         return output
+
+    @staticmethod
+    def _write_charging_sites(writer, results):
+        profiles = results.get('site_load_profiles', {})
+        if not profiles:
+            return
+        inputs = results.get('run_metadata', {}).get('inputs', {})
+        step = inputs.get('time_step_minutes', 15)
+        sites = {site['id']: site for site in inputs.get('charging_sites', [])}
+        rows = []
+        for site_id, load in profiles.items():
+            occupied = results.get('site_occupied_connectors', {}).get(site_id, [])
+            grid = results.get('site_grid_import_profiles', {}).get(site_id, [])
+            for t, power in enumerate(load):
+                rows.append({'Site ID': site_id, 'Site': sites.get(site_id, {}).get('name', site_id),
+                             'Period': t+1, 'Day': t*step//1440+1,
+                             'Time': f'{t*step//60%24:02d}:{t*step%60:02d}', 'Charging (kW)': power,
+                             'Grid import (kW)': grid[t] if t < len(grid) else None,
+                             'Occupied connectors': occupied[t] if t < len(occupied) else None})
+        pd.DataFrame(rows).to_excel(writer, sheet_name='Charging Locations', index=False, startrow=2)
+        ExcelExporter._apply_table_formatting(writer, 'Charging Locations', 'Charging power and physical connector occupancy')
+        connections = results.get('connection_schedules', {})
+        if connections:
+            pd.DataFrame(connections).rename_axis('Period (zero-based)').to_excel(writer, sheet_name='Bus Connections', startrow=2)
+            ExcelExporter._apply_table_formatting(writer, 'Bus Connections', 'Physical connection site per bus and period (blank = disconnected)')
+        config_rows = []
+        for site in sites.values():
+            config_rows.append({'Site ID': site['id'], 'Name': site.get('name', ''),
+                                'Nodes': ', '.join(site.get('nodes', [])), 'Connectors': site.get('num_chargers'),
+                                'Connector power (kW)': site.get('charger_power_kw'), 'Site charging limit (kW)': site.get('charger_capacity_kw'),
+                                'Site grid limit (kW)': site.get('grid_limit_kw'),
+                                'No switching': '; '.join(f"{w['start']} to {w['end']}" for w in site.get('no_switch_windows', [])),
+                                'Connect on arrival': site.get('allow_connect_on_arrival', True),
+                                'PV/BESS location': site['id'] == inputs.get('energy_site_id')})
+        if config_rows:
+            pd.DataFrame(config_rows).to_excel(writer, sheet_name='Location Settings', index=False, startrow=2)
+            ExcelExporter._apply_table_formatting(writer, 'Location Settings', 'Location capacities and switching restrictions')
+        if results.get('baseline_feasible') is False:
+            pd.DataFrame({'Arrival baseline issues': results.get('baseline_issues', [])}).to_excel(writer, sheet_name='Baseline Issues', index=False)
 
     @staticmethod
     def _write_single_horizon(writer, results: dict):
@@ -229,7 +269,7 @@ class ExcelExporter:
         ExcelExporter._create_kpi_card(worksheet, start_col=4, start_row=4, label="Total Cost", value=f"€{cost:,.2f}")
         ExcelExporter._create_kpi_card(worksheet, start_col=6, start_row=4, label="Baseline Cost", value=f"€{base_cost:,.2f}", color="6B7280")
         
-        ExcelExporter._create_kpi_card(worksheet, start_col=4, start_row=7, label="Financial Savings", value=f"€{savings:,.2f} ({savings_pct:.1f}%)", color="059669" if savings > 0 else "1E3A8A")
+        ExcelExporter._create_kpi_card(worksheet, start_col=4, start_row=7, label="Financial Savings", value="n.a. (arrival baseline infeasible)" if results.get("baseline_feasible") is False else f"€{savings:,.2f} ({savings_pct:.1f}%)", color="059669" if savings > 0 else "1E3A8A")
         ExcelExporter._create_kpi_card(worksheet, start_col=6, start_row=7, label="Peak Grid Import", value=f"{results.get('peak_load_kw', 0.0):,.1f} kW", color="DC2626")
         
         ExcelExporter._create_kpi_card(worksheet, start_col=4, start_row=10, label="Grid Import Energy", value=f"{energy_mwh:,.2f} MWh")
@@ -482,7 +522,7 @@ class ExcelExporter:
         ExcelExporter._create_kpi_card(worksheet, start_col=4, start_row=4, label="Total Cost", value=f"€{cost:,.2f}")
         ExcelExporter._create_kpi_card(worksheet, start_col=6, start_row=4, label="Baseline Cost", value=f"€{base_cost:,.2f}", color="6B7280")
         
-        ExcelExporter._create_kpi_card(worksheet, start_col=4, start_row=7, label="Accumulated Savings", value=f"€{savings:,.2f} ({savings_pct:.1f}%)", color="059669" if savings > 0 else "1E3A8A")
+        ExcelExporter._create_kpi_card(worksheet, start_col=4, start_row=7, label="Accumulated Savings", value="n.a. (arrival baseline infeasible)" if results.get("baseline_feasible") is False else f"€{savings:,.2f} ({savings_pct:.1f}%)", color="059669" if savings > 0 else "1E3A8A")
         ExcelExporter._create_kpi_card(worksheet, start_col=6, start_row=7, label="Max Peak Load", value=f"{results.get('peak_load_kw', 0.0):,.1f} kW", color="DC2626")
         
         ExcelExporter._create_kpi_card(worksheet, start_col=4, start_row=10, label="Grid Import Energy", value=f"{energy_mwh:,.2f} MWh")

@@ -3,7 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from .models import OptimizationInputs, OptimizationResult
 from .services.optimization import run_optimization
 from .services.price_service import PriceService, AWattarProvider
-from .utils.excel_processor import process_umlauf_excel
+from .utils.excel_processor import process_umlauf_excel, scan_umlauf_excel
+from .services.charging_sites import validate_sites
+from .services.feasibility import energy_feasibility_issues
 from fastapi import UploadFile, File, Form
 
 app = FastAPI(title="eDOPT Optimization API")
@@ -49,6 +51,10 @@ async def validate_inputs(inputs: OptimizationInputs):
     Validates the input data structure and internal consistency.
     """
     issues = []
+    try:
+        validate_sites(inputs)
+    except ValueError as exc:
+        issues.append({'type': 'ERROR', 'message': str(exc)})
     num_periods = int((inputs.planning_horizon_hours * 60) / inputs.time_step_minutes)
     
     # Check 1: Price consistency
@@ -91,6 +97,8 @@ async def validate_inputs(inputs: OptimizationInputs):
         if sum(bus.availability) == 0:
             issues.append({
                 "type": "WARNING",
+                "code": "NO_CHARGING_AVAILABILITY",
+                "bus_id": bus.id,
                 "message": f"Bus {bus.id} has NO availability for charging during the entire horizon."
             })
 
@@ -132,6 +140,9 @@ async def validate_inputs(inputs: OptimizationInputs):
         if inputs.pv_config.capacity_kw <= 0:
             issues.append({"type": "WARNING", "message": "PV: Peak power is 0 or negative, but a PV scenario is selected."})
 
+    if inputs.charging_sites and not any(issue["type"] == "ERROR" for issue in issues):
+        issues.extend(energy_feasibility_issues(inputs))
+
     if any(issue["type"] == "ERROR" for issue in issues):
         return {"status": "invalid", "issues": issues}
     
@@ -142,7 +153,8 @@ async def validate_inputs(inputs: OptimizationInputs):
 
 @app.post("/api/data/pre-scan-excel")
 async def handle_excel_pre_scan(
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    sheet_name: Optional[str] = Form(None)
 ):
     """
     Scans the uploaded Excel file to extract all unique node IDs
@@ -150,46 +162,11 @@ async def handle_excel_pre_scan(
     """
     try:
         content = await file.read()
-        import pandas as pd
-        import numpy as np
-        from io import BytesIO
-        
-        try:
-            xl = pd.ExcelFile(BytesIO(content))
-            sheet_name = xl.sheet_names[0]
-            if "Tabelle1" in xl.sheet_names:
-                sheet_name = "Tabelle1"
-            df = xl.parse(sheet_name)
-        except Exception as read_err:
-            raise HTTPException(status_code=400, detail=f"Could not parse Excel file: {str(read_err)}")
-
-        for col in ["von", "nach"]:
-            if col not in df.columns:
-                df[col] = np.nan
-        
-        all_nodes_set = set(df['von'].dropna().astype(str).unique()) | set(df['nach'].dropna().astype(str).unique())
-        all_nodes = sorted(list(all_nodes_set))
-
-        suggested = set()
-        if 'Typ' in df.columns:
-            suggested.update(df[df['Typ']=='A']['nach'].dropna().astype(str).unique())
-            suggested.update(df[df['Typ']=='E']['von'].dropna().astype(str).unique())
-        
-        suggested = suggested & all_nodes_set
-        
-        if not suggested:
-            suggested = {n for n in all_nodes if 'DEPOT' in n.upper() or 'DEP' in n.upper() or 'VS' in n.upper()}
-
-        suggested_nodes = sorted(list(suggested))
-
-        return {
-            "suggested_depot_nodes": suggested_nodes,
-            "all_nodes": all_nodes
-        }
+        return scan_umlauf_excel(content, sheet_name)
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Excel Pre-Scan Error: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Excel Pre-Scan Error: {str(e)}")
 
 @app.post("/api/data/process-excel")
 async def handle_excel_upload(
@@ -212,14 +189,14 @@ async def handle_excel_upload(
                 extra_settings = json.loads(settings)
                 proc_settings.update(extra_settings)
             except Exception as json_err:
-                print(f"Error parsing settings JSON: {json_err}")
+                raise ValueError(f'Invalid import settings: {json_err}')
 
         results = process_umlauf_excel(content, settings=proc_settings)
         return results
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Excel Processing Error: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Excel Processing Error: {str(e)}")
 
 @app.get("/api/prices/awattar")
 async def get_awattar_prices(date: str, horizon_hours: int = 24):

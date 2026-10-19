@@ -2,8 +2,10 @@ import pandas as pd
 import numpy as np
 import datetime as dt
 import math
+import re
 from io import BytesIO
 from typing import Dict, Any
+from .excel_locations import location_profiles
 
 DEFAULT_SETTINGS = {
     "SHEET_NAME": "Tabelle1",
@@ -23,6 +25,11 @@ DEFAULT_SETTINGS = {
 
     "DEFAULT_CONSUMPTION_WH_PER_M": 1.0,
     "DEFAULT_BATTERY_CAPACITY_KWH": 500.0,
+    "DISTANCE_UNIT": "legacy",
+    "MIXED_KM_THRESHOLD": 50.0,
+    "CHARGING_SITES": [],
+    "UMLAUF_VEHICLE_TYPES": {},
+    "USE_FIRST_VEHICLE_TYPE": False,
 }
 
 def to_minutes(val):
@@ -33,7 +40,14 @@ def to_minutes(val):
     if isinstance(val, pd.Timestamp):
         return val.hour * 60 + val.minute + val.second / 60
 
+    if isinstance(val, (dt.timedelta, pd.Timedelta)):
+        return val.total_seconds() / 60
     s = str(val).strip()
+    match = re.fullmatch(r'(\d+):(\d{2})(?::(\d{2}))?(?:\[\+(\d+)\])?', s)
+    if match:
+        hours, minutes, seconds, days = (int(v or 0) for v in match.groups())
+        if minutes < 60 and seconds < 60:
+            return days * 1440 + hours * 60 + minutes + seconds / 60
     for fmt in ("%H:%M:%S", "%H:%M"):
         try:
             t = dt.datetime.strptime(s, fmt).time()
@@ -42,10 +56,28 @@ def to_minutes(val):
             continue
     return np.nan
 
-def clean_distance(val):
+def clean_distance(val, unit="legacy", mixed_km_threshold=50.0):
     if pd.isna(val) or val == "":
         return 0
 
+    if unit != 'legacy':
+        text = str(val).strip().lower().replace(' ', '')
+        explicit = 'km' if text.endswith('km') else 'm' if text.endswith('m') else None
+        text = text.removesuffix('km').removesuffix('m').replace(',', '.')
+        try:
+            number = float(text)
+        except ValueError:
+            raise ValueError(f'Invalid distance: {val!r}')
+        if not math.isfinite(number) or number < 0:
+            raise ValueError(f'Invalid distance: {val!r}')
+        effective = explicit or unit
+        if effective == 'mixed':
+            if mixed_km_threshold <= 0:
+                raise ValueError('The mixed-distance integer threshold must be positive.')
+            effective = 'km' if not number.is_integer() or number < mixed_km_threshold else 'm'
+        if effective not in ('km', 'm'):
+            raise ValueError('Distance unit must be legacy, km, m, or mixed.')
+        return int(round(number * (1000 if effective == 'km' else 1)))
     if isinstance(val, (int, float, np.number)):
         f_val = float(val)
         if f_val.is_integer():
@@ -120,7 +152,8 @@ def filter_planungsbedingung(df: pd.DataFrame, settings: Dict[str, Any]) -> pd.D
     target = settings["PLANUNGSBEDINGUNG"]
     include_blank = settings.get("INCLUDE_BLANK_PLANUNGSBEDINGUNG", True)
 
-    cond_bt = df["Betriebstage"] == settings["BETRIEBSTAGE"]
+    days = settings['BETRIEBSTAGE']
+    cond_bt = pd.Series(True, index=df.index) if days in (None, []) else df['Betriebstage'].isin(days if isinstance(days, list) else [days])
 
     if include_blank:
         cond_pb = (df["Planungsbedingung"] == target) | (df["Planungsbedingung"].isna()) | (df["Planungsbedingung"].astype(str).str.strip() == "")
@@ -129,13 +162,55 @@ def filter_planungsbedingung(df: pd.DataFrame, settings: Dict[str, Any]) -> pd.D
 
     return df[cond_bt & cond_pb].copy()
 
+
+def scan_umlauf_excel(content, sheet_name=None):
+    xl = pd.ExcelFile(BytesIO(content))
+    sheet_name = sheet_name or ('Tabelle1' if 'Tabelle1' in xl.sheet_names else xl.sheet_names[0])
+    df = xl.parse(sheet_name)
+    required = {'Umlauf', 'Typ', 'von', 'nach', 'Startzeit', 'Endzeit'}
+    if not required.issubset(df.columns):
+        raise ValueError(f'{sheet_name} is not a timetable. Select a sheet containing Umlauf, Typ, von, nach, Startzeit and Endzeit.')
+    nodes = sorted(set(df['von'].dropna().astype(str)) | set(df['nach'].dropna().astype(str)))
+    suggested = sorted(set(df.loc[df.Typ.eq('A'), 'nach'].dropna().astype(str)) | set(df.loc[df.Typ.eq('E'), 'von'].dropna().astype(str)))
+    groups = {}
+    for node in suggested:
+        site_id = re.sub(r'_[AE]$', '', node)
+        groups.setdefault(site_id, []).append(node)
+    descriptions = {}
+    for node_col, desc_col in [('von', 'von (Beschreibung)'), ('nach', 'nach (Beschreibung)')]:
+        if desc_col in df:
+            descriptions.update({str(r[node_col]): str(r[desc_col]) for _, r in df[[node_col, desc_col]].dropna().iterrows()})
+    days = sorted(df['Betriebstage'].dropna().astype(str).unique()) if 'Betriebstage' in df else []
+    return {
+        'sheet_names': xl.sheet_names, 'selected_sheet': sheet_name,
+        'operating_days': days,
+        'suggested_operating_days': [] if re.search(r'Mo\s*-\s*Do', sheet_name, re.I) else ['Alle Mo-Fr'] if 'Alle Mo-Fr' in days else days,
+        'suggested_depot_nodes': suggested, 'all_nodes': nodes,
+        'node_descriptions': descriptions,
+        'suggested_sites': [{'id': key, 'name': re.sub(r'\s+[AE]$', '', descriptions.get(value[0], key)), 'nodes': value} for key, value in groups.items()],
+        'vehicle_types': sorted(df.apply(get_vehicle_type, axis=1).unique().tolist()),
+        'umlaeufe': [{'id': str(key), 'vehicle_types': [v for v in g.apply(get_vehicle_type, axis=1).unique().tolist() if v]} for key, g in df.groupby('Umlauf')],
+    }
+
 def process_umlauf_excel(file_content: bytes, settings: dict = None):
     s = {**DEFAULT_SETTINGS, **(settings or {})}
     if "DEPOT_NODES" in s:
         s["DEPOT_NODES"] = set(s["DEPOT_NODES"])
 
-    raw = pd.read_excel(BytesIO(file_content), sheet_name=s["SHEET_NAME"])
+    xl = pd.ExcelFile(BytesIO(file_content))
+    sheet_name = s['SHEET_NAME']
+    if not settings or 'SHEET_NAME' not in settings:
+        sheet_name = 'Tabelle1' if 'Tabelle1' in xl.sheet_names else xl.sheet_names[0]
+    if (not settings or 'BETRIEBSTAGE' not in settings) and re.search(r'Mo\s*-\s*Do', sheet_name, re.I):
+        s['BETRIEBSTAGE'] = []
+    raw = xl.parse(sheet_name)
     raw = raw.copy()
+    required = {'Umlauf', 'Betriebstage', 'Planungsbedingung', 'Typ', 'von', 'nach', 'Startzeit', 'Endzeit', 'Meter'}
+    missing = required - set(raw.columns)
+    if missing:
+        raise ValueError(f'Missing timetable columns in {sheet_name}: {", ".join(sorted(missing))}')
+    if s['CHARGING_SITES']:
+        raw['Umlauf'] = raw['Umlauf'].map(lambda value: str(value) if pd.notna(value) else np.nan)
     raw["_source_order"] = np.arange(len(raw))
 
     cols = [
@@ -152,18 +227,31 @@ def process_umlauf_excel(file_content: bytes, settings: dict = None):
 
     df = raw[cols].copy()
     df = filter_planungsbedingung(df, s)
+    if df.empty:
+        raise ValueError('No timetable rows match the selected operating days and planning condition.')
 
     df["start_min"] = df["Startzeit"].apply(to_minutes)
     df["end_min"] = df["Endzeit"].apply(to_minutes)
     df["dur_min"] = df["Dauer"].apply(to_minutes)
-    df["Meter"] = df["Meter"].apply(clean_distance)
+    df["Meter"] = df["Meter"].apply(lambda value: clean_distance(value, s['DISTANCE_UNIT'], s['MIXED_KM_THRESHOLD']))
 
     mask = df["end_min"].isna() & df["start_min"].notna() & df["dur_min"].notna()
     df.loc[mask, "end_min"] = df.loc[mask, "start_min"] + df.loc[mask, "dur_min"]
 
-    df = df[df["start_min"].notna() & df["end_min"].notna()].copy()
+    invalid = df[df['start_min'].isna() | df['end_min'].isna() | df['Umlauf'].isna()]
+    if not invalid.empty:
+        rows = [int(i) + 2 for i in invalid['_source_order']]
+        raise ValueError(f'Invalid/missing times or Umlauf in Excel rows {rows[:20]}. No rows were silently removed.')
+    overnight = df['end_min'] < df['start_min']
+    df.loc[overnight, 'end_min'] += 1440
 
     df["vehicle_type"] = df.apply(get_vehicle_type, axis=1)
+    if s['USE_FIRST_VEHICLE_TYPE']:
+        # Resolve slash-separated alternatives per source entry, before looking
+        # up consumption/capacity. Explicit per-Umlauf overrides take precedence.
+        df['vehicle_type'] = df['vehicle_type'].map(lambda value: value.split('/', 1)[0].strip())
+    vehicle_overrides = s['UMLAUF_VEHICLE_TYPES']
+    df['vehicle_type'] = df.apply(lambda row: vehicle_overrides.get(str(row['Umlauf']), row['vehicle_type']), axis=1)
 
     consumptions = []
     capacities = []
@@ -199,6 +287,11 @@ def process_umlauf_excel(file_content: bytes, settings: dict = None):
     cleaned["trip_energy_kwh"] = cleaned["trip_energy_kwh"].round(6)
 
     validation_warnings = []
+    if s['DISTANCE_UNIT'] == 'legacy':
+        values = pd.to_numeric(raw['Meter'], errors='coerce')
+        ambiguous = raw[(values > 0) & (values < 100) & (values % 1 == 0)]
+        if len(ambiguous):
+            validation_warnings.append({'type': 'DISTANCE_UNIT', 'message': f'{len(ambiguous)} small integer distances are interpreted as metres in legacy mode. Verify the selected distance rule (e.g. 21 means 21 m).'} )
     windows = []
 
     time_steps, time_labels = build_time_grid(s)
@@ -324,6 +417,8 @@ def process_umlauf_excel(file_content: bytes, settings: dict = None):
                 "nach": trip["nach"],
                 "nach_desc": "" if pd.isna(trip["nach (Beschreibung)"]) else str(trip["nach (Beschreibung)"]),
                 "end": minutes_to_hhmm(trip["end_min"]),
+                "start_min": float(trip['start_min']),
+                "end_min": float(trip['end_min']),
                 "dist_m": float(trip["Meter"]),
                 "energy_kwh": float(trip["trip_energy_kwh"]),
                 "planungsbedingung": "" if pd.isna(trip["Planungsbedingung"]) else str(trip["Planungsbedingung"]),
@@ -442,6 +537,18 @@ def process_umlauf_excel(file_content: bytes, settings: dict = None):
                         availability.loc[umlauf, label] = 0
 
     bus_input_lookup = {b["id"]: b for b in bus_inputs}
+    if s['CHARGING_SITES']:
+        profiles, location_windows = location_profiles(df, s['CHARGING_SITES'], s)
+        windows_df = pd.DataFrame(location_windows)
+        for bus_id, profile in profiles.items():
+            bus_input_lookup[bus_id].update(profile)
+            bus_input_lookup[bus_id]['site_nodes'] = {site['id']: site['nodes'] for site in s['CHARGING_SITES']}
+            availability.loc[bus_id] = [int(any(p[t] for p in profile['site_availability'].values())) for t in range(len(time_steps))]
+        for bus_id, bus in bus_input_lookup.items():
+            # Readiness ends at the first actual charging opportunity, not an
+            # arbitrary depot marker that has no infrastructure.
+            next_charge = next((t for t in range(len(time_steps)) if availability.loc[bus_id].iloc[t] and trip_energy_matrix.loc[bus_id].iloc[:t].sum() > 0), len(time_steps))
+            bus['next_day_required_energy_kwh'] = float(trip_energy_matrix.loc[bus_id].iloc[:next_charge].sum())
     for umlauf in availability.index:
         bus_id = str(umlauf)
         if bus_id in bus_input_lookup:
@@ -457,6 +564,8 @@ def process_umlauf_excel(file_content: bytes, settings: dict = None):
             })
 
     return {
+        "import_summary": {'sheet_name': sheet_name, 'source_rows': len(raw), 'imported_rows': len(df), 'excluded_rows': len(raw)-len(df), 'distance_unit': s['DISTANCE_UNIT']},
+        "charging_sites": s['CHARGING_SITES'],
         "cleaned_trips": cleaned.fillna("").to_dict(orient="records"),
         "charging_windows": windows_df.fillna("").to_dict(orient="records") if not windows_df.empty else [],
         "availability_matrix": {

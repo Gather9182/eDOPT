@@ -1,8 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Upload, Table as TableIcon, Plus, Save, AlertCircle, Loader2, FileSpreadsheet, Check, Zap, Download, Clock, TrendingUp, Info, Circle, Settings, Battery, MapPin, ArrowRight } from 'lucide-react';
 import { preScanExcel, processExcel, fetchAWattarPrices, getPricesForOptimization } from '../services/api';
-import { mapExcelToBuses } from '../utils/dataMapping';
 import PriceChart from '../components/PriceChart';
+import ChargingSitesEditor from '../components/ChargingSitesEditor';
+import TimetableImportOptions from '../components/TimetableImportOptions';
+import { getItem, setItem } from '../utils/db';
+import { timetableSettings, timetableFingerprint, processTimetableDraft, projectWithTimetable, saveTimetableSource, loadTimetableSource } from '../utils/timetableImport';
 
 const InfoTooltip = ({ title, text, align = 'center' }) => (
   <div className="tooltip-container">
@@ -17,22 +20,35 @@ const InfoTooltip = ({ title, text, align = 'center' }) => (
 const InputData = ({ projectData, setProjectData, setActiveTab }) => {
   const [activeSubTab, setActiveSubTab] = useState('umlaufplan');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isContinuing, setIsContinuing] = useState(false);
+  const [priceBusy, setPriceBusy] = useState(false);
+  const [inputError, setInputError] = useState('');
+  const operationVersion = useRef(0);
+  useEffect(() => () => { operationVersion.current += 1; }, []);
   const [activeResultTab, setActiveResultTab] = useState('trips');
   const [currentExcelResult, setCurrentExcelResult] = useState(null);
-  const [roundWindows, setRoundWindows] = useState(false);
-  const [defaultEnergy, setDefaultEnergy] = useState(projectData.meta.default_energy_demand || 180);
-  const [initialSoc, setInitialSoc] = useState(projectData.meta.initial_soc_fraction * 100 || 100);
-  const [minFinalSoc, setMinFinalSoc] = useState(projectData.meta.min_final_soc_fraction * 100 || 20);
+  const [roundWindows, setRoundWindows] = useState(projectData.meta.round_charging_windows || false);
+  const [initialSoc, setInitialSoc] = useState((projectData.meta.initial_soc_fraction ?? 1) * 100);
+  const [minFinalSoc, setMinFinalSoc] = useState((projectData.meta.min_final_soc_fraction ?? .2) * 100);
+  const [scan, setScan] = useState(projectData.meta.timetable_scan || null);
+  const [importOptions, setImportOptions] = useState(() => ({ sheet: '', days: ['Alle Mo-Fr'], distanceUnit: 'legacy', mixedThreshold: 50, vehicleOverrides: {}, useFirstVehicleType: false, ...projectData.meta.import_settings }));
 
   const [uploadedFile, setUploadedFile] = useState(null);
-  const [suggestedDepots, setSuggestedDepots] = useState([]);
-  const [selectedDepots, setSelectedDepots] = useState([]);
-  const [allNodes, setAllNodes] = useState([]);
-  const [showDepotConfig, setShowDepotConfig] = useState(false);
+  const [suggestedDepots, setSuggestedDepots] = useState(projectData.meta.timetable_scan?.suggested_depot_nodes || []);
+  const [selectedDepots, setSelectedDepots] = useState(projectData.meta.selected_depot_nodes || []);
+  const [allNodes, setAllNodes] = useState(projectData.meta.timetable_nodes || []);
+  const [showDepotConfig, setShowDepotConfig] = useState(Boolean(projectData.meta.timetable_scan));
+  const initialFingerprint = useRef(timetableFingerprint(timetableSettings({ projectData, options: importOptions, selectedDepots, initialSoc, minFinalSoc }), roundWindows));
+  const sourceName = uploadedFile?.name || projectData.meta.timetable_source_name || '';
+  const configurationTypes = [...new Set(scan ? scan.umlaeufe.flatMap(bus => {
+    const override = importOptions.vehicleOverrides[bus.id];
+    return override ? [override] : bus.vehicle_types.map(type => importOptions.useFirstVehicleType ? type.split('/', 1)[0].trim() : type);
+  }) : (projectData.buses || []).map(bus => bus.vehicle_type).filter(Boolean))];
 
   const tabs = [
     { id: 'umlaufplan', label: 'Umlaufplan' },
     { id: 'constraints', label: 'Constraints' },
+    { id: 'charging', label: 'Ladeorte & Sperrzeiten' },
     { id: 'pricing', label: 'Electricity Pricing' },
   ];
 
@@ -41,100 +57,95 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
     if (!file) return;
 
     setUploadedFile(file);
+    setScan(null);
+    setInputError('');
+    setCurrentExcelResult(null);
+    setShowDepotConfig(false);
     setIsProcessing(true);
     try {
       const scanResult = await preScanExcel(file);
+      setScan(scanResult);
+      setImportOptions(prev => ({ ...prev, sheet: scanResult.selected_sheet, days: scanResult.suggested_operating_days, vehicleOverrides: {} }));
       setSuggestedDepots(scanResult.suggested_depot_nodes || []);
       setSelectedDepots(scanResult.suggested_depot_nodes || []);
       setAllNodes(scanResult.all_nodes || []);
       setShowDepotConfig(true);
     } catch (err) {
       console.error(err);
-      alert('Error reading Excel file. Please check format.');
+      setInputError(err.response?.data?.detail || 'Die Excel-Datei konnte nicht gelesen werden. Bitte das Format prüfen.');
     } finally {
       setIsProcessing(false);
     }
   };
 
-  const handleProcessClick = async () => {
-    if (!uploadedFile) return;
+  const handleSheetChange = async sheet => {
+    setInputError('');
+    setCurrentExcelResult(null);
+    setImportOptions(prev => ({ ...prev, sheet }));
     setIsProcessing(true);
+    setShowDepotConfig(false);
     try {
-      const specs = {};
-      const typeConfigs = projectData.meta.vehicle_types_config || {};
-      
-      Object.keys(typeConfigs).forEach(type => {
-        const config = typeConfigs[type];
-        if (typeof config === 'object') {
-          specs[type] = {
-            consumption_wh_per_m: config.consumption,
-            battery_capacity_kwh: config.battery
-          };
-        } else {
-          specs[type] = {
-            consumption_wh_per_m: Number(config),
-            battery_capacity_kwh: projectData.constraints.max_battery_capacity_kwh
-          };
+      const file = uploadedFile || await loadTimetableSource(projectData.meta.timetable_source_key, getItem);
+      if (!file) throw new Error('Bitte die ursprüngliche Excel-Datei erneut hochladen.');
+      const result = await preScanExcel(file, sheet);
+      setScan(result);
+      setAllNodes(result.all_nodes);
+      setSelectedDepots(result.suggested_depot_nodes);
+      setSuggestedDepots(result.suggested_depot_nodes);
+      setImportOptions(prev => ({ ...prev, days: result.suggested_operating_days, vehicleOverrides: {} }));
+      setShowDepotConfig(true);
+    } catch (err) {
+      setInputError(err.response?.data?.detail || err.message);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const processCurrentInputs = async (continueToSettings = false) => {
+    if (isProcessing || priceBusy) return;
+    const version = ++operationVersion.current;
+    setIsProcessing(true);
+    setIsContinuing(continueToSettings);
+    setInputError('');
+    try {
+      if (uploadedFile && (!scan || scan.selected_sheet !== importOptions.sheet)) {
+        throw new Error('Bitte ein gültiges Tabellenblatt auswählen.');
+      }
+      const file = uploadedFile || await loadTimetableSource(projectData.meta.timetable_source_key, getItem);
+      const context = { projectData, options: importOptions, selectedDepots, initialSoc, minFinalSoc,
+        file, roundWindows, allNodes, scan, initialFingerprint: initialFingerprint.current };
+      const data = await processTimetableDraft(context, processExcel);
+      if (version !== operationVersion.current) return;
+      if (continueToSettings) {
+        let nextProject = projectWithTimetable(projectData, data, context);
+        const requestedDate = nextProject.meta.price_requested_date;
+        if (requestedDate && (requestedDate !== nextProject.meta.price_date || !nextProject.pricing?.length)) {
+          const prices = await getPricesForOptimization(requestedDate, nextProject.meta.planning_horizon, nextProject.meta.time_resolution);
+          if (!prices.prices?.length) throw new Error('Für das ausgewählte Datum wurden keine Strompreise gefunden.');
+          nextProject = { ...nextProject, pricing: prices.prices, meta: { ...nextProject.meta, price_date: requestedDate, price_unit: 'EUR/MWh', price_source: 'awattar' } };
         }
-      });
-
-      const settings = {
-        VEHICLE_TYPE_SPECS: specs,
-        DEFAULT_CONSUMPTION_WH_PER_M: projectData.meta.default_consumption_wh_m,
-        DEFAULT_BATTERY_CAPACITY_KWH: projectData.constraints.max_battery_capacity_kwh,
-        INITIAL_SOC_FRACTION: initialSoc / 100,
-        MIN_FINAL_SOC_FRACTION: minFinalSoc / 100,
-        DEPOT_NODES: selectedDepots
-      };
-
-      const data = await processExcel(uploadedFile, roundWindows, settings);
-      setCurrentExcelResult(data);
-      setActiveResultTab('trips');
+        context.sourceKey = uploadedFile ? await saveTimetableSource(file, setItem) : projectData.meta.timetable_source_key;
+        if (version !== operationVersion.current) return;
+        nextProject.meta.timetable_source_key = context.sourceKey || null;
+        setProjectData(nextProject);
+        setActiveTab('run');
+      } else {
+        setCurrentExcelResult(data);
+        setActiveResultTab('trips');
+      }
     } catch (err) {
       console.error(err);
-      alert('Error processing Excel file. Please ensure the backend is running and the file format is correct.');
+      if (version === operationVersion.current) setInputError(err.response?.data?.detail || err.message);
     } finally {
-      setIsProcessing(false);
+      if (version === operationVersion.current) {
+        setIsProcessing(false);
+        setIsContinuing(false);
+      }
     }
   };
 
-  const applyToProject = () => {
-    if (!currentExcelResult || !currentExcelResult.bus_inputs) return;
-
-    // Use the pre-calculated bus inputs from the backend, 
-    // adding global constraints for power and efficiency
-    const mappedBuses = currentExcelResult.bus_inputs.map(bus => ({
-      ...bus,
-      max_power_kw: Number(projectData.constraints.max_power_per_bus),
-      efficiency: Number(projectData.constraints.efficiency),
-      // Ensure IDs are strings
-      id: String(bus.id)
-    }));
-
-    setProjectData(prev => ({
-      ...prev,
-      buses: mappedBuses,
-      constraints: {
-        ...prev.constraints,
-        max_power_per_bus: projectData.constraints.max_power_per_bus,
-        max_battery_capacity_kwh: projectData.constraints.max_battery_capacity_kwh,
-        efficiency: projectData.constraints.efficiency
-      },
-      meta: {
-        ...prev.meta,
-        last_upload: new Date().toISOString(),
-        charger_capacity_kw: projectData.constraints.charger_capacity_kw,
-        grid_limit_kw: projectData.constraints.grid_limit_kw,
-        initial_soc_fraction: initialSoc / 100,
-        min_final_soc_fraction: minFinalSoc / 100,
-        num_chargers: projectData.constraints.num_chargers,
-        planning_horizon: 24,
-        time_resolution: 15
-      }
-    }));
-
-    alert('Data successfully integrated with SoC profiles! You can now run the optimization.');
-  };
+  const handleProcessClick = () => processCurrentInputs(false);
+  const handleContinue = () => processCurrentInputs(true);
 
   return (
     <div className="input-container animate-in">
@@ -145,13 +156,16 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
         </div>
         <button 
           className="btn btn-primary px-6 py-2 shadow-lg flex items-center gap-2 group"
-          onClick={() => setActiveTab('run')}
+          onClick={handleContinue}
+          disabled={isProcessing || priceBusy}
         >
-          <span className="font-bold text-sm">Continue to Settings</span>
-          <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
+          <span className="font-bold text-sm">{isContinuing ? 'Verarbeiten und übernehmen…' : 'Continue to Settings'}</span>
+          {isContinuing ? <Loader2 size={18} className="animate-spin" /> : <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />}
         </button>
       </div>
-
+      {inputError && <div role="alert" className="card p-4 mb-4 text-error"><AlertCircle size={18} /><span>{inputError}</span></div>}
+      <p className="text-sm text-muted mb-4">Hochladen, konfigurieren und „Continue to Settings“ wählen: Der Umlaufplan wird mit allen aktuellen Einstellungen verarbeitet und automatisch ins Projekt übernommen.</p>
+      <fieldset disabled={isProcessing || priceBusy} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
       <div className="tab-header mb-6">
         {tabs.map(tab => (
           <button
@@ -169,28 +183,22 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
           <UmlaufplanTab
             isProcessing={isProcessing}
             processedData={currentExcelResult}
-            setProcessedData={setCurrentExcelResult}
             handleFileUpload={handleFileUpload}
             activeResultTab={activeResultTab}
             setActiveResultTab={setActiveResultTab}
-            defaultEnergy={defaultEnergy}
-            setDefaultEnergy={setDefaultEnergy}
-            applyToProject={applyToProject}
             projectStatus={projectData.meta.data_source}
             roundWindows={roundWindows}
             setRoundWindows={setRoundWindows}
-            initialSoc={initialSoc}
-            setInitialSoc={setInitialSoc}
-            minFinalSoc={minFinalSoc}
-            setMinFinalSoc={setMinFinalSoc}
             showDepotConfig={showDepotConfig}
-            setShowDepotConfig={setShowDepotConfig}
             suggestedDepots={suggestedDepots}
             selectedDepots={selectedDepots}
             setSelectedDepots={setSelectedDepots}
             allNodes={allNodes}
-            uploadedFile={uploadedFile}
+            sourceName={sourceName}
             handleProcessClick={handleProcessClick}
+            chargingMode={Boolean(projectData.charging?.enabled)}
+            configureChargingSites={() => setActiveSubTab('charging')}
+            importControls={<TimetableImportOptions scan={scan} options={importOptions} disabled={isProcessing} onSheetChange={handleSheetChange} onChange={value => { setImportOptions(value); setCurrentExcelResult(null); }} initialSoc={initialSoc} setInitialSoc={setInitialSoc} minFinalSoc={minFinalSoc} setMinFinalSoc={setMinFinalSoc} vehicleTypes={[...new Set([...(scan?.vehicle_types || []), ...Object.keys(projectData.meta.vehicle_types_config || {})])]} />}
           />
         )}
         {activeSubTab === 'constraints' && (
@@ -198,16 +206,20 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
             projectData={projectData}
             setProjectData={setProjectData}
             activeExcelData={currentExcelResult}
+            availableVehicleTypes={configurationTypes}
           />
         )}
         {activeSubTab === 'pricing' && (
           <PricingTab
             projectData={projectData}
             setProjectData={setProjectData}
+            onBusyChange={setPriceBusy}
+            onError={setInputError}
           />
         )}
+        {activeSubTab === 'charging' && <ChargingSitesEditor projectData={projectData} setProjectData={setProjectData} nodes={allNodes.length ? allNodes : projectData.meta.timetable_nodes || []} descriptions={scan?.node_descriptions} suggestions={scan?.suggested_sites} selectedDepotNodes={selectedDepots} />}
       </div>
-
+      </fieldset>
       <style dangerouslySetInnerHTML={{
         __html: `
         .tab-header {
@@ -396,30 +408,25 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
 const UmlaufplanTab = ({
   isProcessing,
   processedData,
-  setProcessedData,
   handleFileUpload,
   activeResultTab,
   setActiveResultTab,
-  defaultEnergy,
-  setDefaultEnergy,
-  applyToProject,
   projectStatus,
   roundWindows,
   setRoundWindows,
-  initialSoc,
-  setInitialSoc,
-  minFinalSoc,
-  setMinFinalSoc,
   showDepotConfig,
-  setShowDepotConfig,
   suggestedDepots,
   selectedDepots,
   setSelectedDepots,
   allNodes,
-  uploadedFile,
-  handleProcessClick
+  sourceName,
+  handleProcessClick,
+  chargingMode,
+  configureChargingSites,
+  importControls
 }) => {
   const [debugUmlaufId, setDebugUmlaufId] = React.useState(null);
+  const [matrixSite, setMatrixSite] = React.useState('');
   const [showAll, setShowAll] = React.useState(false);
   const [tableWidth, setTableWidth] = React.useState(0);
   const tableRef = React.useRef(null);
@@ -451,12 +458,6 @@ const UmlaufplanTab = ({
       return () => resizeObserver.disconnect();
     }
   }, [processedData, activeResultTab, showAll]);
-
-  const handleEnergyChange = (index, value) => {
-    const newData = { ...processedData };
-    newData.cleaned_trips[index].energy_demand = Number(value);
-    setProcessedData(newData);
-  };
 
   const handleExport = () => {
     if (!processedData) return;
@@ -535,7 +536,7 @@ const UmlaufplanTab = ({
         <h3 className="card-title text-primary"><TableIcon size={18} /> Umlaufplan Management</h3>
         {projectStatus === 'uploaded' && (
           <div className="flex items-center gap-2 text-success font-bold text-sm">
-            <Check size={16} /> Data Active for Optimization
+            <Check size={16} /> Änderungen werden bei „Continue to Settings“ übernommen
           </div>
         )}
       </div>
@@ -561,12 +562,12 @@ const UmlaufplanTab = ({
           </>
         ) : (
           <>
-            <FileSpreadsheet size={32} color={uploadedFile ? "var(--success)" : "var(--primary)"} />
+            <FileSpreadsheet size={32} color={sourceName ? "var(--success)" : "var(--primary)"} />
             <div className="text-center">
-              {uploadedFile ? (
+              {sourceName ? (
                 <>
-                  <p className="font-semibold text-success">File Selected: {uploadedFile.name}</p>
-                  <p className="text-muted text-sm">Configure your depot nodes below, then click "Process timetable"</p>
+                  <p className="font-semibold text-success">File Selected: {sourceName}</p>
+                  <p className="text-muted text-sm">Einstellungen konfigurieren und oben auf „Continue to Settings“ klicken. Eine Vorschau ist optional.</p>
                 </>
               ) : (
                 <>
@@ -580,15 +581,18 @@ const UmlaufplanTab = ({
         )}
       </div>
 
+      {importControls}
+      {processedData?.import_summary && <p className="mb-4 text-sm">Blatt <strong>{processedData.import_summary.sheet_name}</strong>: {processedData.import_summary.imported_rows} von {processedData.import_summary.source_rows} Zeilen übernommen; {processedData.import_summary.excluded_rows} durch Filter ausgeschlossen. {processedData.bus_inputs.length} Umläufe.</p>}
       {showDepotConfig && (
         <div className="depot-config-card">
           <div className="depot-config-title">
             <MapPin size={16} /> Configure Depot Charging Nodes
           </div>
           <div className="depot-config-desc">
-            Opportunity/depot charging will only be allowed when a vehicle is at these nodes.
+            {chargingMode ? 'Die Ladeorte und Knotenzuordnungen aus „Ladeorte & Sperrzeiten“ werden verwendet.' : 'Opportunity/depot charging will only be allowed when a vehicle is at these nodes.'}
           </div>
-          
+          <button className="btn btn-outline mb-3" onClick={configureChargingSites}>Ladeorte & Sperrzeiten konfigurieren</button>
+          {!chargingMode && <>
           <div>
             <span className="depot-section-label">SUGGESTED DEPOTS (From A/E trips):</span>
             {suggestedDepots.length > 0 ? (
@@ -639,14 +643,15 @@ const UmlaufplanTab = ({
             </span>
           </div>
 
+          </>}
           <div className="depot-footer">
-            {uploadedFile && (
+            {sourceName && (
               <button
                 onClick={handleProcessClick}
                 disabled={isProcessing}
                 className="btn btn-primary text-xs py-2 px-4 flex items-center gap-2 font-bold shadow-md hover:shadow-lg transition-all"
               >
-                <Zap size={14} /> Process timetable
+                <Zap size={14} /> Vorschau erzeugen (optional)
               </button>
             )}
           </div>
@@ -758,48 +763,7 @@ const UmlaufplanTab = ({
 
       {processedData && (
         <div className="processed-results-section animate-in">
-          <div className="settings-strip mb-8 p-6 bg-app/50 rounded-xl border border-border/60">
-            <div className="flex items-center justify-between gap-6">
-              <div className="flex items-center gap-8">
-                <div className="form-group mb-0">
-                  <label className="form-label text-xs uppercase tracking-wider font-bold text-muted">Default Energy Demand (kWh)</label>
-                  <input
-                    type="number"
-                    className="form-input py-2 px-4 shadow-sm"
-                    style={{ width: '80px' }}
-                    value={defaultEnergy}
-                    onChange={(e) => setDefaultEnergy(e.target.value)}
-                  />
-                </div>
-                <div className="form-group mb-0">
-                  <label className="form-label text-[10px] uppercase tracking-wider font-bold text-muted">Initial SoC (%)</label>
-                  <input
-                    type="number"
-                    className="form-input py-2 px-4 shadow-sm"
-                    style={{ width: '70px' }}
-                    value={initialSoc}
-                    onChange={(e) => setInitialSoc(e.target.value)}
-                  />
-                </div>
-                <div className="form-group mb-0">
-                  <label className="form-label text-[10px] uppercase tracking-wider font-bold text-muted">Reserve (%)</label>
-                  <input
-                    type="number"
-                    className="form-input py-2 px-4 shadow-sm"
-                    style={{ width: '70px' }}
-                    value={minFinalSoc}
-                    onChange={(e) => setMinFinalSoc(e.target.value)}
-                  />
-                </div>
-                <div className="text-muted text-sm border-l border-border pl-8">
-                  Mapping <strong className="text-primary">{processedData.availability_matrix.index.length}</strong> buses.
-                </div>
-              </div>
-              <button className="btn btn-primary px-6 py-2 shadow-md" onClick={applyToProject}>
-                <Zap size={18} /> Use This Data for Optimization
-              </button>
-            </div>
-          </div>
+          <p className="text-sm text-muted mb-4">Vorschau der letzten Verarbeitung. Beim Weitergehen werden die aktuellen Einstellungen automatisch neu verarbeitet und übernommen.</p>
 
           <div className="flex justify-between items-center mb-4">
             <div className="result-tabs">
@@ -863,7 +827,7 @@ const UmlaufplanTab = ({
                       <th>End Name</th>
                       <th>Assigned Type</th>
                       <th>Dist (m)</th>
-                      <th>Energy</th>
+                      <th>Energy (kWh)</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -880,13 +844,7 @@ const UmlaufplanTab = ({
                         <td><span className="text-xs font-bold text-secondary">{row.vehicle_type}</span></td>
                         <td><span className="text-xs">{row.Meter}</span></td>
                         <td>
-                          <input
-                          type="number"
-                          className="form-input py-0 px-2 text-xs"
-                          style={{ width: '80px' }}
-                          value={row.energy_demand || defaultEnergy}
-                          onChange={(e) => handleEnergyChange(i, e.target.value)}
-                        />
+                          {Number(row.trip_energy_kwh || 0).toFixed(2)}
                         </td>
                       </tr>
                     ))}
@@ -918,6 +876,7 @@ const UmlaufplanTab = ({
               )}
 
               {activeResultTab === 'matrix' && (
+                <><label className="block mb-3">Ladeort <select aria-label="Matrix Ladeort" className="input" value={matrixSite} onChange={e => setMatrixSite(e.target.value)}><option value="">Alle Ladeorte</option>{(processedData.charging_sites || []).map(site => <option key={site.id} value={site.id}>{site.name || site.id}</option>)}</select></label>
                 <table className="data-table border-collapse" ref={tableRef}>
                   <thead>
                     <tr>
@@ -931,7 +890,7 @@ const UmlaufplanTab = ({
                     {processedData.availability_matrix.index.map((rowLabel, i) => (
                       <tr key={i}>
                         <td className="font-bold sticky-col">{rowLabel}</td>
-                        {processedData.availability_matrix.data[i].map((val, j) => (
+                        {(matrixSite ? processedData.bus_inputs.find(bus => bus.id === String(rowLabel))?.site_availability?.[matrixSite] || processedData.availability_matrix.data[i].map(() => 0) : processedData.availability_matrix.data[i]).map((val, j) => (
                           <td key={j} style={{ background: val === 1 ? 'var(--primary-soft)' : 'transparent', textAlign: 'center' }}>
                             {val === 1 ? '●' : ''}
                           </td>
@@ -939,7 +898,7 @@ const UmlaufplanTab = ({
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                </table></>
               )}
             </div>
           </div>
@@ -966,7 +925,7 @@ const UmlaufplanTab = ({
   );
 };
 
-const ConstraintsTab = ({ projectData, setProjectData, activeExcelData }) => {
+const ConstraintsTab = ({ projectData, setProjectData, activeExcelData, availableVehicleTypes }) => {
   const handleChange = (field, value) => {
     setProjectData(prev => ({
       ...prev,
@@ -1008,7 +967,7 @@ const ConstraintsTab = ({ projectData, setProjectData, activeExcelData }) => {
   // Extract unique vehicle types from active excel data
   const uniqueTypes = activeExcelData
     ? [...new Set(activeExcelData.cleaned_trips.map(t => t.vehicle_type).filter(Boolean))]
-    : [];
+    : availableVehicleTypes || [];
 
   return (
     <div className="space-y-6">
@@ -1192,71 +1151,44 @@ const ConstraintsTab = ({ projectData, setProjectData, activeExcelData }) => {
   );
 };
 
-const PricingTab = ({ projectData, setProjectData }) => {
-  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
-  const [priceData, setPriceData] = useState(null);
+const PricingTab = ({ projectData, setProjectData, onBusyChange, onError }) => {
+  const [selectedDate, setSelectedDate] = useState(projectData.meta.price_requested_date || projectData.meta.price_date || new Date().toISOString().split('T')[0]);
+  const [priceData, setPriceData] = useState(projectData.meta.price_preview || null);
   const [isLoading, setIsLoading] = useState(false);
-  const [isApplying, setIsApplying] = useState(false);
   
-  const [assumptions, setAssumptions] = useState(projectData.meta.price_assumptions || {
+  const assumptions = projectData.meta.price_assumptions || {
     supplier_markup: 10.0,
     variable_network_charge: 15.0,
     other_variable_levies: 0.0,
     electricity_tax: 8.2,
     use_vat: false,
     pricing_mode: 'effective'
-  });
+  };
 
   const handleAssumptionChange = (key, value) => {
-    setAssumptions(prev => ({ ...prev, [key]: value }));
+    setProjectData(prev => ({ ...prev, meta: { ...prev.meta, price_assumptions: { ...assumptions, [key]: value } } }));
   };
 
   const handleFetchAWattar = async () => {
     setIsLoading(true);
+    onBusyChange(true);
+    onError('');
     try {
       const data = await fetchAWattarPrices(selectedDate);
+      const result = await getPricesForOptimization(selectedDate, projectData.meta.planning_horizon || 24, projectData.meta.time_resolution || 15);
+      if (!result.prices?.length) throw new Error('Für das ausgewählte Datum wurden keine Strompreise gefunden.');
       setPriceData(data.prices);
+      setProjectData(prev => ({ ...prev, pricing: result.prices, meta: { ...prev.meta, price_date: selectedDate, price_requested_date: selectedDate, price_preview: data.prices, price_unit: 'EUR/MWh', price_source: 'awattar' } }));
     } catch (err) {
       console.error(err);
-      alert('Error fetching aWATTar prices. Please try another date or check your connection.');
+      onError(err.response?.data?.detail || err.message || 'Die Strompreise konnten nicht geladen werden.');
     } finally {
       setIsLoading(false);
+      onBusyChange(false);
     }
   };
 
-  const handleApplyToProject = async () => {
-    if (!priceData) return;
-    setIsApplying(true);
-    try {
-      const result = await getPricesForOptimization(
-        selectedDate,
-        projectData.meta.planning_horizon || 24,
-        projectData.meta.time_resolution || 15
-      );
-
-      // We apply the raw spot prices to 'pricing' but store assumptions in meta
-      // The actual transformation happens during the run logic to preserve the raw series
-      setProjectData(prev => ({
-        ...prev,
-        pricing: result.prices,
-        meta: {
-          ...prev.meta,
-          price_date: selectedDate,
-          price_unit: 'EUR/MWh',
-          price_source: 'awattar',
-          price_assumptions: assumptions
-        }
-      }));
-      alert('Electricity prices successfully applied to the project!');
-    } catch (err) {
-      console.error(err);
-      alert('Error processing prices for optimization.');
-    } finally {
-      setIsApplying(false);
-    }
-  };
-
-  const handleCsvUpload = (e) => {
+  const handleCsvUpload = () => {
     alert('Manual CSV upload logic would go here. For now, please use the aWATTar API.');
   };
 
@@ -1282,7 +1214,7 @@ const PricingTab = ({ projectData, setProjectData }) => {
                 type="date"
                 className="form-input"
                 value={selectedDate}
-                onChange={(e) => setSelectedDate(e.target.value)}
+                onChange={(e) => { setSelectedDate(e.target.value); setProjectData(prev => ({ ...prev, meta: { ...prev.meta, price_requested_date: e.target.value } })); }}
               />
               <p style={{ fontSize: '10px' }} className="text-muted mt-1 italic px-0.5">
                 Austrian EPEX Spot Day-Ahead prices (aWATTar)
@@ -1319,15 +1251,8 @@ const PricingTab = ({ projectData, setProjectData }) => {
                   Fetch aWATTar
                 </button>
 
-                <button
-                  className="btn btn-primary flex-1 py-3 shadow-lg flex items-center justify-center gap-2"
-                  disabled={!priceData || isApplying}
-                  onClick={handleApplyToProject}
-                >
-                  {isApplying ? <Loader2 size={20} className="animate-spin" /> : <Zap size={18} />}
-                  Apply Sync
-                </button>
               </div>
+              <p className="text-sm text-muted">Preise werden beim Abruf automatisch übernommen. Ein neu gewähltes Datum wird auch bei „Continue to Settings“ synchronisiert. Preisaufschläge werden direkt gespeichert.</p>
             </div>
           </div>
 
@@ -1466,7 +1391,7 @@ const PricingTab = ({ projectData, setProjectData }) => {
             <div className="p-4 bg-app/30 border-t">
               <p className="text-[10px] text-muted leading-relaxed flex items-start gap-2">
                 <Info size={14} className="shrink-0 mt-0.5" />
-                The preview curve shows the raw hourly market data. Applying the sync will interpolate this data to your project's 15-minute resolution.
+                Die Vorschau zeigt die Marktpreise. Die Preiszeitreihe wird automatisch für die Zeitauflösung des Projekts übernommen.
               </p>
             </div>
           </div>

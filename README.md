@@ -199,7 +199,7 @@ eDOPT/
 ## Workflow
 
 1. **Upload operational data:** Provide a compatible vehicle circulation plan or use the included non-confidential example input.
-2. **Review preprocessing:** Inspect the derived vehicle availability and trip-energy structures.
+2. **Configure and continue:** Configure import options, vehicle types and charging locations, then click **Continue to Settings**. The current timetable is processed and applied automatically before navigation; generating a preprocessing preview is optional.
 3. **Configure the depot:** Define vehicle assumptions, charger capacity, charging sockets, grid connection limits, and state-of-charge requirements.
 4. **Configure prices:** Select time-varying or fixed electricity prices and define additional variable procurement components.
 5. **Select a scenario:** Run the optimized baseline, PV, BESS, or combined PV-BESS model.
@@ -210,6 +210,88 @@ eDOPT/
 ---
 
 ## Data Availability and Reproducibility
+
+### Importing other timetables and configuring charging locations
+
+The import screen supports worksheet selection and operating-day labels. For a sheet named
+`Mo-Do Schule`, all operating-day labels are selected by default. The import summary states
+how many source rows were retained or excluded. Times such as `00:19[+1]` retain their day
+offset; malformed times produce an error instead of silently removing a trip.
+
+**Continue to Settings** processes the current Excel source with all current import, vehicle
+and location settings, applies the returned bus profiles and then opens optimization settings.
+There is no separate timetable-apply step. Errors keep the input screen open with an explanatory
+message. The Excel source is retained locally in browser storage so that editing locations or
+vehicle specifications later also regenerates the profiles, including after a page reload.
+Projects imported before source-file caching may need the original Excel file uploaded once.
+Vehicle specifications can be configured immediately after upload without generating a preview.
+Price assumptions are stored as edited; fetching prices applies them automatically, and a newly
+selected market date is synchronized on Continue if it has not yet been applied.
+
+After **Run Check**, routes without charging availability or with individually impossible
+energy requirements can be excluded using **Ignore and continue without these routes**.
+The energy check gives each bus optimistic charging access without competition or switching
+locks; failure already under those conditions identifies a route that cannot be served with
+the current battery, charging windows, power and final reserve. It also detects final reserve
+plus next-day energy exceeding battery capacity. Passing this check does not prove that the
+shared fleet infrastructure and switching rules are feasible. Solver failures remain visible
+on the settings page. The remaining fleet is checked again; unrelated errors still block
+optimization. Exclusions apply to single runs, all scenarios and
+long-term chunks, and are recorded in result metadata. Imported routes are retained and can
+be restored with **Alle Umläufe wieder einschließen**. Reprocessing a timetable clears the
+exclusions so corrected routes are reconsidered. At least one route must remain included.
+
+Select the distance convention explicitly. **Previous detection** retains the original Wels
+interpretation. **Metres** and **kilometres** interpret all unlabelled values in the chosen unit.
+**Mixed export** interprets fractional values as kilometres and integer values below a configurable
+threshold as kilometres; integers at or above the threshold are metres. With threshold 50,
+`21` means 21 km, `94` means 94 m, and `86.16` means 86.16 km. Explicit `m`/`km` suffixes take
+precedence in the explicit modes. Check this convention against the source export. Optional
+vehicle-type overrides apply a single configured vehicle type to every trip of an Umlauf.
+The optional first-type checkbox uses only the part before the first slash in each source
+vehicle-type label: `NGB/RB12` becomes `NGB`. Consumption and battery specifications
+are looked up using the resulting type. Explicit per-Umlauf selections take precedence
+over this checkbox and retain their selected label.
+
+Under **Ladeorte & Sperrzeiten**, enable separate charging locations. Import the suggested A/E
+node pairs or add locations manually, then assign all timetable nodes representing each physical
+site. These are candidate sites, not evidence of installed charging infrastructure.
+Use **Ausgewählte A/E-Knoten übernehmen** to transfer only the A/E nodes selected in the
+Umlaufplan pill selector. Existing locations retain their capacities and switching windows;
+missing nodes are added to the matching location without creating duplicate assignments.
+Enter the actual
+number of connectors, power per connector, aggregate charging power and grid limit at each site.
+The existing fleet-wide grid and aggregate charging limits remain additional constraints; the legacy
+fleet-wide connector count is replaced by site connector counts. Continue automatically regenerates
+the timetable after changes to node mappings. Intermediate stops can also be used without A/E trip markers.
+
+Charging is allowed only in full time slots contained in a stay, with no driving overlap. Physical
+presence includes partial boundary slots so that a socket cannot be reassigned before departure.
+Every positive-duration movement, including type B, blocks charging. Arrivals after midnight are
+included in repeated operating-day profiles. This is a repeated timetable, not a calendar-aware
+selection of different Monday/Tuesday timetables or public holidays.
+
+Each location supports multiple daily **no-switch windows**, including windows crossing midnight.
+Equal start/end times block switching all day. During a window, a parked connected bus keeps its
+connector even at zero charging power. Power can still be modulated automatically. Timetable
+departures are always permitted. An optional setting allows a newly arriving bus to connect once to
+a free connector; it cannot displace another parked vehicle. Lock boundaries within a time slot
+are treated conservatively by blocking switching for that slot. Connector identity within a site is
+interchangeable: connectors at one site share the same configured power rating.
+
+For repeated complete-day horizons, overnight connections remain consistent across the horizon
+boundary. Long-term simulation carries connection states, as well as SoC, into the next chunk.
+PV and the stationary BESS must be assigned to one location and cannot supply other sites.
+An infeasible location-constrained MILP is reported as a failure; the legacy heuristic is not used
+because it cannot represent physical connections. The charge-on-arrival comparison uses the same
+site/connection rules and reports unmet operating requirements instead of presenting them as a
+valid cost comparison. Results and Excel exports include site power, grid import and occupied
+connectors, bus connection schedules, and site settings.
+
+Backend regression tests: `cd backend` followed by `.venv\Scripts\python.exe -m unittest discover -s tests`.
+Frontend profile, import and fleet exclusion tests: `cd frontend` followed by `node --test tests/charging.test.mjs tests/timetableImport.test.mjs tests/optimizationFleet.test.mjs`.
+
+## Source Data
 
 The original vehicle circulation plan used for the Wels case study is not included because it contains depot-specific operational information provided by the industry partners. The exact empirical case study therefore cannot be reproduced from this repository alone.
 
