@@ -7,6 +7,7 @@ from ..models import OptimizationInputs, OptimizationResult, BusDiagnostic, PVCo
 from .pv_service import PVService
 from .weather_service import WeatherService
 from .charging_sites import add_site_constraints, site_results, validate_sites, simulate_site_baseline
+from .opportunity_charging import add_opportunity_variables, link_visit_charging, opportunity_results, possible_availability
 
 def simulate_baseline_load(inputs: OptimizationInputs) -> np.ndarray:
     """
@@ -228,10 +229,12 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
     p_vars = {} # Bus charging power
     z_vars = {} # Bus charging binary
     soc_vars = {} # Bus battery SoC
+    opportunities = add_opportunity_variables(prob, inputs)
     
     for bus in inputs.buses:
+        potential = possible_availability(bus, inputs)
         for t in range(num_periods):
-            up_bound = bus.max_power_kw if bus.availability[t] == 1 else 0.0
+            up_bound = bus.max_power_kw if potential[t] else 0.0
             p_vars[(bus.id, t)] = pulp.LpVariable(f"p_{bus.id}_{t}", lowBound=0, upBound=up_bound)
             z_vars[(bus.id, t)] = pulp.LpVariable(f"z_{bus.id}_{t}", cat="Binary")
             
@@ -364,7 +367,7 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
     for bus in inputs.buses:
         prob += (soc_vars[(bus.id, 0)] == bus.initial_soc_kwh)
         for t in range(num_periods):
-            trip_energy = float(bus.trip_energy_profile_kwh[t])
+            trip_energy = float(bus.trip_energy_profile_kwh[t])+opportunities['energy'].get((bus.id,t),0)
             prob += (
                 soc_vars[(bus.id, t + 1)] == soc_vars[(bus.id, t)] 
                 + p_vars[(bus.id, t)] * delta_t * bus.efficiency - trip_energy
@@ -420,7 +423,9 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
             prob += (pulp.lpSum(z_vars[(bus.id, t)] for bus in inputs.buses) <= inputs.num_chargers)
         prob += (total_bus_p <= inputs.charger_capacity_kw)
 
-    site_state = add_site_constraints(prob, inputs, p_vars, grid_import, (pv_used, b_charge, b_discharge))
+    site_state = add_site_constraints(prob, inputs, p_vars, grid_import, (pv_used, b_charge, b_discharge), opportunities)
+    if site_state:
+        link_visit_charging(prob, inputs, opportunities, site_state[0], site_state[1], soc_vars)
     # --- Solve ---
     solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=180)
     prob.solve(solver)
@@ -485,6 +490,7 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
     baseline_cost = sum(baseline_load[t] * (inputs.electricity_prices[t] / 1000.0) * delta_t for t in range(num_periods))
 
     # Diagnostics (Simplified reuse)
+    visit_results = opportunity_results(inputs, opportunities, site_state[1]) if site_state else {}
     bus_diagnostics = []
     for bus in inputs.buses:
         final_soc = soc_profiles[bus.id][-1]
@@ -509,7 +515,7 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
             initial_soc_kwh=bus.initial_soc_kwh,
             final_soc_kwh=final_soc,
             min_soc_reached_kwh=min_reached,
-            total_trip_energy_kwh=sum(bus.trip_energy_profile_kwh),
+            total_trip_energy_kwh=sum(bus.trip_energy_profile_kwh)+sum(visit_results.get('additional_trip_energy_profiles',{}).get(bus.id,[])),
             total_charged_energy_kwh=charged_to_bat,
             is_charged=charged_to_bat > 0.1,
             status_flag=status,
@@ -518,6 +524,7 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
 
     baseline_issues = simulate_site_baseline(inputs)[1] if inputs.charging_sites else []
     return OptimizationResult(
+        **visit_results,
         **site_results(inputs, site_state),
         baseline_feasible=not baseline_issues,
         baseline_issues=baseline_issues,
@@ -569,13 +576,15 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
     _validate_bus_inputs(inputs)
 
     prob = pulp.LpProblem("BusDepotChargingOptimization", pulp.LpMinimize)
+    opportunities = add_opportunity_variables(prob, inputs)
     p_vars = {}
     z_vars = {}
     soc_vars = {}
 
     for bus in inputs.buses:
+        potential = possible_availability(bus, inputs)
         for t in range(num_periods):
-            up_bound = bus.max_power_kw if bus.availability[t] == 1 else 0.0
+            up_bound = bus.max_power_kw if potential[t] else 0.0
             p_vars[(bus.id, t)] = pulp.LpVariable(f"p_{bus.id}_{t}", lowBound=0, upBound=up_bound)
             z_vars[(bus.id, t)] = pulp.LpVariable(f"z_{bus.id}_{t}", cat="Binary")
         for t in range(num_periods + 1):
@@ -586,7 +595,7 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
     for bus in inputs.buses:
         prob += (soc_vars[(bus.id, 0)] == bus.initial_soc_kwh)
         for t in range(num_periods):
-            trip_energy = float(bus.trip_energy_profile_kwh[t])
+            trip_energy = float(bus.trip_energy_profile_kwh[t])+opportunities['energy'].get((bus.id,t),0)
             prob += (soc_vars[(bus.id, t + 1)] == soc_vars[(bus.id, t)] + p_vars[(bus.id, t)] * delta_t * bus.efficiency - trip_energy)
             prob += (p_vars[(bus.id, t)] <= bus.max_power_kw * z_vars[(bus.id, t)])
         final_threshold = bus.min_final_soc_kwh
@@ -600,7 +609,9 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
             prob += (pulp.lpSum(z_vars[(bus.id, t)] for bus in inputs.buses) <= inputs.num_chargers)
         prob += (pulp.lpSum(p_vars[(bus.id, t)] for bus in inputs.buses) <= inputs.charger_capacity_kw)
 
-    site_state = add_site_constraints(prob, inputs, p_vars)
+    site_state = add_site_constraints(prob, inputs, p_vars, opportunities=opportunities)
+    if site_state:
+        link_visit_charging(prob, inputs, opportunities, site_state[0], site_state[1], soc_vars)
     solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=180)
     prob.solve(solver)
     status = pulp.LpStatus[prob.status]
@@ -609,6 +620,7 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
 
     schedules = {}
     soc_profiles = {}
+    visit_results = opportunity_results(inputs, opportunities, site_state[1]) if site_state else {}
     bus_diagnostics = []
     aggregated_profile = np.zeros(num_periods)
     for bus in inputs.buses:
@@ -619,7 +631,7 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
         for t in range(num_periods): aggregated_profile[t] += bus_sch[t]
         
         # Enhanced Diagnostics logic
-        total_trip_energy = sum(bus.trip_energy_profile_kwh)
+        total_trip_energy = sum(bus.trip_energy_profile_kwh)+sum(visit_results.get('additional_trip_energy_profiles',{}).get(bus.id,[]))
         charged_en = sum(bus_sch[t] * delta_t * bus.efficiency for t in range(num_periods))
         min_soc = min(bus_soc)
         final_threshold = bus.min_final_soc_kwh + (bus.next_day_required_energy_kwh if getattr(inputs, 'use_next_day_readiness', False) else 0)
@@ -650,6 +662,7 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
 
     baseline_issues = simulate_site_baseline(inputs)[1] if inputs.charging_sites else []
     return OptimizationResult(
+        **visit_results,
         **site_results(inputs, site_state),
         baseline_feasible=not baseline_issues,
         baseline_issues=baseline_issues,

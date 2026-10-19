@@ -26,6 +26,29 @@ class ChargingSite(BaseModel):
     no_switch_windows: List[SwitchingWindow] = Field(default_factory=list)
     allow_connect_on_arrival: bool = True
 
+class OpportunityVisit(BaseModel):
+    id: str
+    gap_id: str
+    site_id: str
+    origin_site_id: Optional[str] = None
+    return_site_id: Optional[str] = None
+    from_node: str = ''
+    to_node: str = ''
+    pause_start_min: float = Field(ge=0, allow_inf_nan=False)
+    pause_end_min: float = Field(gt=0, allow_inf_nan=False)
+    outbound_minutes: float = Field(ge=0, allow_inf_nan=False)
+    return_minutes: float = Field(ge=0, allow_inf_nan=False)
+    outbound_km: float = Field(ge=0, allow_inf_nan=False)
+    return_km: float = Field(ge=0, allow_inf_nan=False)
+    outbound_energy_kwh: float = Field(ge=0, allow_inf_nan=False)
+    return_energy_kwh: float = Field(ge=0, allow_inf_nan=False)
+    buffer_minutes: float = Field(0, ge=0, allow_inf_nan=False)
+    min_charge_minutes: float = Field(30, gt=0, allow_inf_nan=False)
+    min_net_energy_kwh: float = Field(0, ge=0, allow_inf_nan=False)
+    min_charging_power_kw: float = Field(1, gt=0, allow_inf_nan=False)
+    allowed_windows: List[SwitchingWindow] = Field(default_factory=list)
+
+
 class BusUmlauf(BaseModel):
     id: str = Field(..., description="Unique identifier for the bus trip / Umlauf (I)")
     availability: List[int] = Field(..., description="Binary vector for time period availability (a_i_t)")
@@ -49,6 +72,8 @@ class BusUmlauf(BaseModel):
     site_arrivals: Dict[str, List[int]] = Field(default_factory=dict)
     site_nodes: Dict[str, List[str]] = Field(default_factory=dict)
     initial_connection_site: Optional[str] = None
+    opportunity_visits: List[OpportunityVisit] = Field(default_factory=list)
+    opportunity_period_minutes: int = Field(1440, gt=0)
 
 class PVConfig(BaseModel):
     capacity_kw: float = Field(0.0, description="Installed PV capacity")
@@ -178,3 +203,6 @@ class OptimizationResult(BaseModel):
     site_occupied_connectors: Dict[str, List[int]] = Field(default_factory=dict)
     baseline_feasible: bool = True
     baseline_issues: List[str] = Field(default_factory=list)
+    opportunity_charging_visits: List[Dict] = Field(default_factory=list)
+    additional_trip_energy_profiles: Dict[str, List[float]] = Field(default_factory=dict)
+    additional_trips: Dict[str, List[Dict]] = Field(default_factory=dict)

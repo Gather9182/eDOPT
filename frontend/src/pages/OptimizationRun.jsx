@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Zap, Terminal, Battery, Clock, CheckCircle, AlertCircle, Loader2, Table as TableIcon, Info, Save, ChevronDown, ChevronUp, Sun, Layers, LayoutDashboard, Activity, Sliders, MapPin, Navigation } from 'lucide-react';
-import { runOptimization as callOptimizeApi, validateInputs } from '../services/api';
+import { runOptimization as callOptimizeApi, validateInputs, API_BASE } from '../services/api';
 import { generateDefaultPrices } from '../utils/dataMapping';
 import { setItem } from '../utils/db';
 import { chargingInputs, locationProfilesForHorizon } from '../utils/charging';
 import { optimizationFleet, excludableBusIds, fleetRunMetadata } from '../utils/optimizationFleet';
 import ExcludedRoutesNotice from '../components/ExcludedRoutesNotice';
+import { inputsWithRealizedVisits, resolvedOpportunityConfig } from '../utils/opportunity';
 
 const InfoTooltip = ({ title, text, align = 'center' }) => (
   <div className="tooltip-container">
@@ -76,28 +77,22 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
   const [saveStatus, setSaveStatus] = useState('idle'); // idle, saved
   const [showInputData, setShowInputData] = useState(false);
   const [showCompareAllToast, setShowCompareAllToast] = useState(false);
+  const [simulationMode, setSimulationMode] = useState('single');
+  const [longTermConfig, setLongTermConfig] = useState(() => {
+    const today = new Date();
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(today.getDate() - 7);
+    return { startDate:sevenDaysAgo.toISOString().split('T')[0],endDate:today.toISOString().split('T')[0],chunkSizeHours:24 };
+  });
   const { included: activeBuses, excluded: excludedBuses } = optimizationFleet(projectData);
   // A check applies only to the fleet and settings that were actually checked.
-  const validationKeyFor = buses => JSON.stringify({ buses, localSettings, scenario, pvConfig, bessConfig, weatherDate,
-    charging: chargingInputs(projectData), pricing: projectData.pricing,
+  const validationKeyFor = buses => JSON.stringify({ buses, localSettings, scenario, pvConfig, bessConfig, weatherDate, simulationMode, longTermConfig,
+    charging: chargingInputs(projectData), opportunity: resolvedOpportunityConfig(projectData), pricing: projectData.pricing,
     initialSoc: projectData.meta.initial_soc_fraction, reserve: projectData.meta.min_final_soc_fraction,
     sourceStep: projectData.meta.time_resolution, latitude: projectData.meta.latitude, longitude: projectData.meta.longitude });
   const validationResult = validationState?.key === validationKeyFor(activeBuses) ? validationState.result : null;
   const excludableIds = excludableBusIds(validationResult, activeBuses);
   const noActiveBuses = projectData.buses.length > 0 && !activeBuses.length;
-
-  // New states for Long-Term Simulation
-  const [simulationMode, setSimulationMode] = useState('single'); // 'single', 'long_term'
-  const [longTermConfig, setLongTermConfig] = useState(() => {
-    const today = new Date();
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(today.getDate() - 7);
-    return {
-      startDate: sevenDaysAgo.toISOString().split('T')[0],
-      endDate: today.toISOString().split('T')[0],
-      chunkSizeHours: 24
-    };
-  });
 
   // Sync to project meta when it changes (e.g. after Excel import)
   useEffect(() => {
@@ -360,7 +355,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             ...result,
             run_metadata: {
               ...fleetRunMetadata(projectData),
-              inputs: JSON.parse(JSON.stringify(inputs)),
+              inputs: JSON.parse(JSON.stringify(inputsWithRealizedVisits(inputs, result))),
               timestamp: new Date().toISOString(),
               run_id: `${new Date().toISOString().split('T')[0]}_BATCH_${s.toUpperCase()}`
             }
@@ -399,7 +394,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           ...result,
           run_metadata: {
             ...fleetRunMetadata(projectData),
-            inputs: JSON.parse(JSON.stringify(inputs)),
+            inputs: JSON.parse(JSON.stringify(inputsWithRealizedVisits(inputs, result))),
             timestamp: new Date().toISOString(),
             run_id: `${new Date().toISOString().split('T')[0]}_${Math.random().toString(36).substr(2, 5).toUpperCase()}`
           }
@@ -437,7 +432,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     try {
       // 1. Fetch Historical Context
       addLog('Fetching historical weather and price data...');
-      const contextRes = await fetch(`http://${window.location.hostname}:8000/api/data/historical-context`, {
+      const contextRes = await fetch(`${API_BASE}/data/historical-context`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -504,6 +499,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       let agg_schedules = [];
       let agg_soc_profiles = [];
       const aggConnections = {}, aggSiteLoads = {}, aggSiteGrids = {}, aggOccupied = {};
+      const aggVisitEnergy = {}, aggAdditionalTrips = {}, aggVisits = [];
       const baselineIssues = new Set();
       const appendProfiles = (target, source) => Object.entries(source || {}).forEach(([key, values]) => { (target[key] ||= []).push(...values); });
       let totalCost = 0;
@@ -593,6 +589,13 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         };
 
         const res = await callOptimizeApi(buildInputs());
+        activeBuses.forEach(bus => {
+          (aggVisitEnergy[bus.id] ||= []).push(...(res.additional_trip_energy_profiles?.[bus.id] || Array(chunkPeriods).fill(0)));
+          (aggAdditionalTrips[bus.id] ||= []).push(...(res.additional_trips?.[bus.id] || []).map(trip => ({...trip,start_min:trip.start_min+startIdx*localSettings.time_resolution,end_min:trip.end_min+startIdx*localSettings.time_resolution})));
+        });
+        aggVisits.push(...(res.opportunity_charging_visits || []).map(visit => ({...visit,
+          departure_min:visit.departure_min+startIdx*localSettings.time_resolution,charger_arrival_min:visit.charger_arrival_min+startIdx*localSettings.time_resolution,
+          return_departure_min:visit.return_departure_min+startIdx*localSettings.time_resolution,return_arrival_min:visit.return_arrival_min+startIdx*localSettings.time_resolution})));
         currentConnections = res.final_connections || {};
         appendProfiles(aggConnections, res.connection_schedules);
         appendProfiles(aggSiteLoads, res.site_load_profiles);
@@ -679,7 +682,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
               const total_charged_energy_kwh = busSch.reduce((sum, p) => sum + p, 0) * dt * efficiency;
               
               const tripsForDay = busInput?.trips || [];
-              const total_trip_energy_kwh = tripsForDay.reduce((sum, t) => sum + (t.energy_kwh || 0), 0);
+              const total_trip_energy_kwh = tripsForDay.reduce((sum, t) => sum + (t.energy_kwh || 0), 0)+
+                (res.additional_trip_energy_profiles?.[busId] || []).slice(chunkStartPeriod,chunkEndPeriod).reduce((sum,e) => sum+e,0);
               
               let status_flag = diag.status_flag || 'healthy';
               let diagnostic_reason = diag.diagnostic_reason || 'Charging requirement met.';
@@ -712,7 +716,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                 total_trip_energy_kwh,
                 total_charged_energy_kwh,
                 is_charged: total_charged_energy_kwh > 0.1,
-                total_distance_km: diag.total_distance_km || 0,
+                total_distance_km: tripsForDay.reduce((sum,trip) => sum+(trip.dist_m || 0)/1000,0)+
+                  (res.additional_trips?.[busId] || []).filter(trip => trip.start_min >= d*1440 && trip.start_min < (d+1)*1440).reduce((sum,trip) => sum+(trip.dist_m || 0)/1000,0),
                 vehicle_type: diag.vehicle_type || busInput?.vehicle_type || 'Bus',
                 status_flag,
                 diagnostic_reason
@@ -739,6 +744,9 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
 
       // 4. Construct flat payload matching standard format
       const finalPayload = {
+        opportunity_charging_visits: aggVisits,
+        additional_trip_energy_profiles: aggVisitEnergy,
+        additional_trips: aggAdditionalTrips,
         connection_schedules: aggConnections,
         final_connections: currentConnections,
         site_load_profiles: aggSiteLoads,
@@ -850,17 +858,25 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     setOptimizationError(null);
     setIsValidating(true);
     addLog('Starting plausibility check...');
+    const currentOpportunity = resolvedOpportunityConfig(projectData);
+    if (currentOpportunity.enabled && projectData.meta.opportunity_import_signature !== JSON.stringify(currentOpportunity)) {
+      setValidationState({key,result:{status:'invalid',issues:[{type:'ERROR',message:'Das Mapping oder die Einstellungen der Zusatzladefahrten wurden geändert. Bitte unter Input Data mit „Continue to Settings“ neu verarbeiten.'}]}});
+      setIsValidating(false);
+      return;
+    }
     if (projectData.buses.length && !busesToValidate.length) {
       setValidationState({ key, result: { status: 'invalid', issues: [{ type: 'ERROR', message: 'Es muss mindestens ein Umlauf für die Optimierung eingeschlossen sein.' }] } });
       setIsValidating(false);
       return;
     }
     
-    const numPeriods = (localSettings.planning_horizon * 60) / localSettings.time_resolution;
+    const validationHours = simulationMode === 'long_term' ? longTermConfig.chunkSizeHours : localSettings.planning_horizon;
+    const numPeriods = (validationHours * 60) / localSettings.time_resolution;
     const inputs = {
       scenario: scenario,
       ...chargingInputs(projectData),
-      planning_horizon_hours: localSettings.planning_horizon,
+      planning_horizon_hours: validationHours,
+      cyclic_connections: simulationMode === 'single',
       time_step_minutes: localSettings.time_resolution,
       buses: busesToValidate.map(bus => {
           const initFrac = projectData.meta.initial_soc_fraction ?? 1.0;
@@ -987,6 +1003,11 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       {status === 'ready' && (
         <div className="animate-in">
           <ExcludedRoutesNotice ids={excludedBuses.map(bus => String(bus.id))} onRestore={handleRestoreExcluded} disabled={isValidating} />
+          {projectData.charging?.opportunity?.enabled && projectData.meta.timetable_warnings?.some(w => w.type === 'OPPORTUNITY_MAPPING') && <details className="card mb-6">
+            <summary>Unvollständige Zusatzlade-Verbindungen werden nicht berücksichtigt</summary>
+            <p className="text-sm mt-2">Fehlende Distanzen, Ladeort- oder Knotenzuordnungen unter „Ladeorte &amp; Sperrzeiten“ ergänzen und mit „Continue to Settings“ neu verarbeiten.</p>
+            <ul className="text-xs mt-2">{projectData.meta.timetable_warnings.filter(w => w.type === 'OPPORTUNITY_MAPPING').map((w,i) => <li key={i}>{w.message}</li>)}</ul>
+          </details>}
           {optimizationError && <div className="card mb-6" role="alert" style={{ borderColor: 'var(--warning)' }}>
             <h3 className="font-bold mb-2">Optimierung konnte keinen gültigen Ladeplan berechnen</h3>
             <p className="text-sm" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{optimizationError}</p>

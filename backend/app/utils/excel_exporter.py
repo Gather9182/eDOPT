@@ -21,6 +21,9 @@ class ExcelExporter:
             else:
                 ExcelExporter._write_single_horizon(writer, results)
             ExcelExporter._write_charging_sites(writer, results)
+            if results.get('opportunity_charging_visits'):
+                pd.DataFrame(results['opportunity_charging_visits']).to_excel(writer, sheet_name='Optional Charging Trips', index=False, startrow=2)
+                ExcelExporter._apply_table_formatting(writer, 'Optional Charging Trips', 'Chosen round trips, charging and additional travel consumption')
                 
         output.seek(0)
         return output

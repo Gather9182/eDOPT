@@ -6,6 +6,7 @@ import re
 from io import BytesIO
 from typing import Dict, Any
 from .excel_locations import location_profiles
+from .opportunity_import import mapping_sheet, opportunity_visits
 
 DEFAULT_SETTINGS = {
     "SHEET_NAME": "Tabelle1",
@@ -30,6 +31,7 @@ DEFAULT_SETTINGS = {
     "CHARGING_SITES": [],
     "UMLAUF_VEHICLE_TYPES": {},
     "USE_FIRST_VEHICLE_TYPE": False,
+    "OPPORTUNITY_CHARGING": {},
 }
 
 def to_minutes(val):
@@ -187,6 +189,7 @@ def scan_umlauf_excel(content, sheet_name=None):
         'suggested_operating_days': [] if re.search(r'Mo\s*-\s*Do', sheet_name, re.I) else ['Alle Mo-Fr'] if 'Alle Mo-Fr' in days else days,
         'suggested_depot_nodes': suggested, 'all_nodes': nodes,
         'node_descriptions': descriptions,
+        'charging_mappings': mapping_sheet(xl, df),
         'suggested_sites': [{'id': key, 'name': re.sub(r'\s+[AE]$', '', descriptions.get(value[0], key)), 'nodes': value} for key, value in groups.items()],
         'vehicle_types': sorted(df.apply(get_vehicle_type, axis=1).unique().tolist()),
         'umlaeufe': [{'id': str(key), 'vehicle_types': [v for v in g.apply(get_vehicle_type, axis=1).unique().tolist() if v]} for key, g in df.groupby('Umlauf')],
@@ -549,6 +552,23 @@ def process_umlauf_excel(file_content: bytes, settings: dict = None):
             # arbitrary depot marker that has no infrastructure.
             next_charge = next((t for t in range(len(time_steps)) if availability.loc[bus_id].iloc[t] and trip_energy_matrix.loc[bus_id].iloc[:t].sum() > 0), len(time_steps))
             bus['next_day_required_energy_kwh'] = float(trip_energy_matrix.loc[bus_id].iloc[:next_charge].sum())
+    visit_config = s['OPPORTUNITY_CHARGING']
+    visits, visit_warnings = opportunity_visits(df, bus_input_lookup,
+        {str(v['Umlauf']): v['consumption_wh_per_m'] for v in detected_vehicle_types}, s['CHARGING_SITES'], visit_config)
+    validation_warnings.extend(visit_warnings)
+    for bus_id, options in visits.items():
+        if options:
+            bus_input_lookup[bus_id]['opportunity_visits'] = options
+            # Reach a first optional charger with enough energy for its outbound leg.
+            existing = bus_input_lookup[bus_id]['next_day_required_energy_kwh']
+            requirements = [existing] if any(availability.loc[bus_id]) else []
+            for option in options:
+                first = option['pause_start_min']+option['buffer_minutes']+option['outbound_minutes']
+                if first < s['HORIZON_END_MIN']:
+                    stop = math.ceil(first/s['TIME_STEP_MIN'])
+                    requirements.append(float(trip_energy_matrix.loc[bus_id].iloc[:stop].sum())+option['outbound_energy_kwh'])
+            if requirements:
+                bus_input_lookup[bus_id]['next_day_required_energy_kwh'] = min(requirements)
     for umlauf in availability.index:
         bus_id = str(umlauf)
         if bus_id in bus_input_lookup:

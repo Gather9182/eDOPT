@@ -21,7 +21,7 @@ async def run_optimization(inputs: OptimizationInputs) -> OptimizationResult:
         return res
     except Exception as e:
         err_str = str(e)
-        if inputs.charging_sites or inputs.use_charging_sites:
+        if inputs.charging_sites or inputs.use_charging_sites or any(bus.opportunity_visits for bus in inputs.buses):
             # The legacy fallback has no physical connection model. Never
             # return an apparently feasible schedule that ignores site locks.
             raise RuntimeError(f'Kein zulässiger Ladeplan für die aktuellen Ladeorte und Umstecksperren: {err_str}. '

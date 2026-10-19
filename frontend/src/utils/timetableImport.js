@@ -1,3 +1,5 @@
+import { resolvedOpportunityConfig } from './opportunity.js';
+
 export function timetableSettings({ projectData, options, selectedDepots, initialSoc, minFinalSoc }) {
   const specs = Object.fromEntries(Object.entries(projectData.meta.vehicle_types_config || {}).map(([type, config]) => [type,
     typeof config === 'object' && config !== null
@@ -10,6 +12,7 @@ export function timetableSettings({ projectData, options, selectedDepots, initia
     UMLAUF_VEHICLE_TYPES: Object.fromEntries(Object.entries(options.vehicleOverrides || {}).filter(([, type]) => type)),
     USE_FIRST_VEHICLE_TYPE: Boolean(options.useFirstVehicleType),
     CHARGING_SITES: projectData.charging?.enabled ? projectData.charging.sites || [] : [],
+    OPPORTUNITY_CHARGING: resolvedOpportunityConfig(projectData),
     VEHICLE_TYPE_SPECS: specs,
     DEFAULT_CONSUMPTION_WH_PER_M: projectData.meta.default_consumption_wh_m,
     DEFAULT_BATTERY_CAPACITY_KWH: projectData.constraints.max_battery_capacity_kwh,
@@ -74,6 +77,8 @@ export function projectWithTimetable(project, data, context) {
       excluded_bus_ids: [],
       timetable_nodes: context.allNodes, selected_depot_nodes: context.selectedDepots,
       timetable_scan: context.scan, round_charging_windows: context.roundWindows,
+      opportunity_import_signature: JSON.stringify(resolvedOpportunityConfig(project)),
+      timetable_warnings: data.validation_results?.warnings || [],
       timetable_source_key: context.sourceKey || null,
       timetable_source_name: context.file?.name || project.meta.timetable_source_name || '',
       last_upload: new Date().toISOString(),

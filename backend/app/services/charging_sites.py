@@ -19,6 +19,8 @@ def slot_is_blocked(site, minute, step):
 
 
 def validate_sites(inputs):
+    if any(bus.opportunity_visits for bus in inputs.buses) and not inputs.charging_sites:
+        raise ValueError('Zusätzliche Ladefahrten benötigen konfigurierte Ladeorte.')
     if inputs.use_charging_sites and not inputs.charging_sites:
         raise ValueError('Add at least one charging location or disable separate charging locations.')
     if not inputs.charging_sites:
@@ -38,6 +40,11 @@ def validate_sites(inputs):
     if not inputs.buses or len({b.id for b in inputs.buses}) != len(inputs.buses):
         raise ValueError('Provide buses with unique Umlauf IDs for location-based charging.')
     for bus in inputs.buses:
+        for visit in bus.opportunity_visits:
+            if visit.site_id not in ids or visit.origin_site_id not in (None, *ids) or visit.return_site_id not in (None, *ids):
+                raise ValueError(f'Bus {bus.id}: unbekannter Ladeort im Mapping.')
+            if visit.pause_end_min <= visit.pause_start_min or visit.pause_end_min-visit.pause_start_min > bus.opportunity_period_minutes:
+                raise ValueError(f'Bus {bus.id}: ungültige Pause für Zusatzladefahrt.')
         if len(bus.availability) != n or len(bus.trip_energy_profile_kwh) != n:
             raise ValueError(f'Bus {bus.id}: availability and trip energy lengths must match the price profile.')
         if bus.site_nodes and bus.site_nodes != {s.id: s.nodes for s in inputs.charging_sites}:
@@ -60,28 +67,43 @@ def validate_sites(inputs):
                 raise ValueError(f'Bus {bus.id}: charging availability exceeds physical presence.')
 
 
-def add_site_constraints(prob, inputs, power, grid_import=None, energy_flows=None):
+def add_site_constraints(prob, inputs, power, grid_import=None, energy_flows=None, opportunities=None):
     if not inputs.charging_sites:
         return None
     validate_sites(inputs)
     n = len(inputs.electricity_prices)
     sites = inputs.charging_sites
     connected, site_power, grids = {}, {}, {}
+    dynamic_buses = {item['bus'].id for item in (opportunities or {}).get('visits', [])}
     for bi, bus in enumerate(inputs.buses):
         for si, site in enumerate(sites):
             available = bus.site_availability.get(site.id, [0] * n)
             present = bus.site_presence.get(site.id, available)
             arrivals = bus.site_arrivals.get(site.id, [int(present[t] and not present[t-1]) for t in range(n)])
+            dynamic = bus.id in dynamic_buses
+            dynamic_presence, dynamic_arrivals = [], []
             for t in range(n):
                 key = (bus.id, site.id, t)
                 y = pulp.LpVariable(f'connected_{bi}_{si}_{t}', cat='Binary')
                 p = pulp.LpVariable(f'site_power_{bi}_{si}_{t}', lowBound=0)
                 connected[key], site_power[key] = y, p
-                prob += y <= present[t]
+                busy = opportunities['busy'].get((bus.id,t),0) if dynamic else 0
+                visit_presence = opportunities['presence'].get(key,0) if dynamic else 0
+                actual_presence = present[t]*(1-busy)+visit_presence
+                actual_arrival = arrivals[t]*(1-busy)+(opportunities['arrivals'].get(key,0) if dynamic else 0)
+                dynamic_presence.append(actual_presence)
+                dynamic_arrivals.append(actual_arrival)
+                prob += y <= actual_presence
                 prob += p <= min(bus.max_power_kw, site.charger_power_kw) * y
-                prob += p <= bus.max_power_kw * available[t]
+                prob += p <= bus.max_power_kw * (available[t]*(1-busy)+visit_presence)
                 blocked = slot_is_blocked(site, inputs.horizon_start_minute + t * inputs.time_step_minutes, inputs.time_step_minutes)
                 if not blocked:
+                    continue
+                if dynamic:
+                    prev = connected[(bus.id,site.id,t-1)] if t else (int(bus.initial_connection_site == site.id) if bus.initial_connection_site is not None else None)
+                    if prev is not None:
+                        prob += y >= prev-(1-actual_presence)-actual_arrival
+                        prob += y <= prev+(actual_arrival if site.allow_connect_on_arrival else 0)
                     continue
                 # Releases for timetable departures are always possible. A positive
                 # arrival event permits only initial connection, never disconnection
@@ -101,7 +123,11 @@ def add_site_constraints(prob, inputs, power, grid_import=None, energy_flows=Non
                     elif not site.allow_connect_on_arrival:
                         prob += y == 0
             # Preserve overnight occupation across the repeated-day boundary.
-            if (inputs.cyclic_connections and bus.initial_connection_site is None and n * inputs.time_step_minutes % 1440 == 0
+            if dynamic and inputs.cyclic_connections and bus.initial_connection_site is None and n*inputs.time_step_minutes % 1440 == 0 and is_switch_blocked(site, inputs.horizon_start_minute):
+                y, prev = connected[(bus.id,site.id,0)], connected[(bus.id,site.id,n-1)]
+                prob += y >= prev-(1-dynamic_presence[0])-dynamic_arrivals[0]
+                prob += y <= prev+(dynamic_arrivals[0] if site.allow_connect_on_arrival else 0)
+            elif (inputs.cyclic_connections and bus.initial_connection_site is None and n * inputs.time_step_minutes % 1440 == 0
                     and present[0] and present[-1] and not arrivals[0]
                     and is_switch_blocked(site, inputs.horizon_start_minute)):
                 prob += connected[(bus.id, site.id, 0)] == connected[(bus.id, site.id, n-1)]

@@ -253,6 +253,44 @@ vehicle-type label: `NGB/RB12` becomes `NGB`. Consumption and battery specificat
 are looked up using the resulting type. Explicit per-Umlauf selections take precedence
 over this checkbox and retain their selected label.
 
+### Optional charging trips during timetable breaks
+
+An optional workbook sheet **Mapping Lademöglichkeiten** is read automatically during
+upload. Its required columns are `Haltestelle`, `Ladestandort`, `Hinweg`, and `Rückweg`.
+Travel times are minutes (for example `15 min`). Optional `Hinweg (km)` and `Rückweg (km)`
+columns supply distances; otherwise enter them in **Ladeorte & Sperrzeiten → Zusätzliche
+Lademöglichkeiten mit Hin- und Rückfahrt**. Missing distances remain missing and the affected
+connections are skipped with an explanation. A zero-minute link defaults to zero kilometres.
+The source workbook is not edited.
+
+Enable optional trips and link each destination to an existing physical charging site.
+Zero-minute mappings to depot A/E nodes can suggest that site automatically; shared
+destinations share the same connector, power and grid limits. Stop nodes, site assignment,
+outbound/return times and distances are editable. Global minimum charging time, buffer per
+direction, minimum net battery-energy gain and minimum power during counted charging slots
+are configurable. Minimum time and buffer can also be overridden per connection. Optional
+allowed transfer windows restrict driving; an empty list permits driving throughout the day.
+New workbooks start with this feature disabled.
+
+Continue to Settings regenerates optional visits from actual gaps between fixed movements.
+The solver chooses whether to visit and when to depart and return, allows at most one
+destination per pause, and includes both travel legs in the battery equations only when
+selected. Original route movements and their energy remain unchanged. Both driving legs and
+the configured minimum charging duration must fit in the pause. Durations are rounded up and
+pause boundaries inward to the chosen time grid. Minimum charging time counts only slots at
+or above the configured minimum power; the configured net gain is after travel consumption
+and charging losses. A bus must already have enough energy to reach the charger.
+
+While travelling it cannot charge or occupy its original connector. Site switching locks and
+arrival permissions also apply to optional visits; optional departures cannot bypass a lock.
+Results and Excel/JSON exports show chosen departures, charger arrival, return, extra distance
+and travel energy. Single-run audit inputs include realized transfer energy and trips while
+retaining original inputs for the charge-on-arrival comparison, which does not use optional
+trips. In non-cyclic long-term chunks, optional trips must finish inside the chunk: cross-chunk
+visits are omitted rather than creating unfinished travel or losing energy. Choose a longer
+continuous chunk to consider a break spanning midnight. Cyclic single-day runs support
+overnight visits across the repeating-day boundary.
+
 Under **Ladeorte & Sperrzeiten**, enable separate charging locations. Import the suggested A/E
 node pairs or add locations manually, then assign all timetable nodes representing each physical
 site. These are candidate sites, not evidence of installed charging infrastructure.
@@ -289,7 +327,7 @@ valid cost comparison. Results and Excel exports include site power, grid import
 connectors, bus connection schedules, and site settings.
 
 Backend regression tests: `cd backend` followed by `.venv\Scripts\python.exe -m unittest discover -s tests`.
-Frontend profile, import and fleet exclusion tests: `cd frontend` followed by `node --test tests/charging.test.mjs tests/timetableImport.test.mjs tests/optimizationFleet.test.mjs`.
+Frontend profile, import, fleet exclusion and optional trip tests: `cd frontend` followed by `node --test tests/charging.test.mjs tests/timetableImport.test.mjs tests/optimizationFleet.test.mjs tests/opportunity.test.mjs`.
 
 ## Source Data
 

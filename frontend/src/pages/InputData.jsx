@@ -3,6 +3,8 @@ import { Upload, Table as TableIcon, Plus, Save, AlertCircle, Loader2, FileSprea
 import { preScanExcel, processExcel, fetchAWattarPrices, getPricesForOptimization } from '../services/api';
 import PriceChart from '../components/PriceChart';
 import ChargingSitesEditor from '../components/ChargingSitesEditor';
+import OpportunityChargingEditor from '../components/OpportunityChargingEditor';
+import { opportunityConfig, mergeScannedMappings } from '../utils/opportunity';
 import TimetableImportOptions from '../components/TimetableImportOptions';
 import { getItem, setItem } from '../utils/db';
 import { timetableSettings, timetableFingerprint, processTimetableDraft, projectWithTimetable, saveTimetableSource, loadTimetableSource } from '../utils/timetableImport';
@@ -65,6 +67,7 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
     try {
       const scanResult = await preScanExcel(file);
       setScan(scanResult);
+      setProjectData(prev => ({...prev,charging:{...prev.charging,opportunity:{...opportunityConfig(prev),mappings:mergeScannedMappings(opportunityConfig(prev).mappings,scanResult.charging_mappings || [])}}}));
       setImportOptions(prev => ({ ...prev, sheet: scanResult.selected_sheet, days: scanResult.suggested_operating_days, vehicleOverrides: {} }));
       setSuggestedDepots(scanResult.suggested_depot_nodes || []);
       setSelectedDepots(scanResult.suggested_depot_nodes || []);
@@ -89,6 +92,7 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
       if (!file) throw new Error('Bitte die ursprüngliche Excel-Datei erneut hochladen.');
       const result = await preScanExcel(file, sheet);
       setScan(result);
+      setProjectData(prev => ({...prev,charging:{...prev.charging,opportunity:{...opportunityConfig(prev),mappings:mergeScannedMappings(opportunityConfig(prev).mappings,result.charging_mappings || [])}}}));
       setAllNodes(result.all_nodes);
       setSelectedDepots(result.suggested_depot_nodes);
       setSuggestedDepots(result.suggested_depot_nodes);
@@ -217,7 +221,10 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
             onError={setInputError}
           />
         )}
-        {activeSubTab === 'charging' && <ChargingSitesEditor projectData={projectData} setProjectData={setProjectData} nodes={allNodes.length ? allNodes : projectData.meta.timetable_nodes || []} descriptions={scan?.node_descriptions} suggestions={scan?.suggested_sites} selectedDepotNodes={selectedDepots} />}
+        {activeSubTab === 'charging' && <>
+          <ChargingSitesEditor projectData={projectData} setProjectData={setProjectData} nodes={allNodes.length ? allNodes : projectData.meta.timetable_nodes || []} descriptions={scan?.node_descriptions} suggestions={scan?.suggested_sites} selectedDepotNodes={selectedDepots} />
+          <OpportunityChargingEditor projectData={projectData} setProjectData={setProjectData} nodes={allNodes} />
+        </>}
       </div>
       </fieldset>
       <style dangerouslySetInnerHTML={{

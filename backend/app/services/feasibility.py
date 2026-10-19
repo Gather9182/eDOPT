@@ -5,6 +5,9 @@ Failure even in this optimistic case proves an individual energy shortfall.
 """
 
 
+from .opportunity_charging import potential_profiles, possible_availability
+
+
 def energy_feasibility_issues(inputs):
     n = len(inputs.electricity_prices)
     dt = inputs.time_step_minutes / 60
@@ -12,8 +15,12 @@ def energy_feasibility_issues(inputs):
         return []
     issues = []
     for bus in inputs.buses:
+        if len(bus.availability) != n or len(bus.trip_energy_profile_kwh) != n:
+            continue
+        potential = potential_profiles(bus, inputs)
+        availability = possible_availability(bus, inputs)
         if (len(bus.availability) != n or len(bus.trip_energy_profile_kwh) != n
-                or not any(bus.availability) or not 0 < bus.efficiency <= 1
+                or not any(availability) or not 0 < bus.efficiency <= 1
                 or bus.initial_soc_kwh < 0 or bus.initial_soc_kwh > bus.max_battery_capacity_kwh
                 or any(energy < 0 for energy in bus.trip_energy_profile_kwh)):
             continue
@@ -26,14 +33,14 @@ def energy_feasibility_issues(inputs):
         soc = bus.initial_soc_kwh
         for t, energy in enumerate(bus.trip_energy_profile_kwh):
             power = 0
-            if bus.availability[t]:
+            if availability[t]:
                 power = min(bus.max_power_kw, inputs.charger_capacity_kw)
                 if inputs.scenario == 'baseline':
                     power = min(power, inputs.grid_limit_kw)
                 if inputs.charging_sites:
                     site_limits = []
                     for site in inputs.charging_sites:
-                        available = bus.site_availability.get(site.id, [])
+                        available = potential.get(site.id, [])
                         if site.num_chargers > 0 and len(available) == n and available[t]:
                             limit = min(site.charger_power_kw, site.charger_capacity_kw)
                             if inputs.scenario == 'baseline' or site.id != inputs.energy_site_id:

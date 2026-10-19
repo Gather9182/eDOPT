@@ -2298,13 +2298,14 @@ const Results = () => {
         // We pre-calculate the state of all buses up to this step i
         if (!auditInputs.buses) return { time: d.time, load: loadVal, price: priceVal, energy, cost, buses: new Set() };
         
-        const fleetSocs = auditInputs.buses.map(b => b.initial_soc_kwh || 0);
+        const baselineBuses = auditInputs.scheduled_buses || auditInputs.buses;
+        const fleetSocs = baselineBuses.map(b => b.initial_soc_kwh || 0);
         for (let t = 0; t <= i; t++) {
            let stepGridKw = 0;
            let stepSockets = 0;
            
-           for (let bIdx = 0; bIdx < auditInputs.buses.length; bIdx++) {
-              const bus = auditInputs.buses[bIdx];
+           for (let bIdx = 0; bIdx < baselineBuses.length; bIdx++) {
+              const bus = baselineBuses[bIdx];
               fleetSocs[bIdx] -= (bus.trip_energy_profile_kwh?.[t] || 0);
               fleetSocs[bIdx] = Math.max(0, fleetSocs[bIdx]);
 
@@ -4047,6 +4048,14 @@ const Results = () => {
                   
                   const busData = results.run_metadata?.inputs?.buses?.find(b => String(b.id) === String(diag.id));
                   let trips = [...(busData?.trips || [])];
+                  if (results.is_long_term && selectedDay !== null) {
+                    const dayStart = Number(selectedDay)*1440;
+                    const transfers = (results.additional_trips?.[diag.id] || []).filter(trip => trip.start_min >= dayStart && trip.start_min < dayStart+1440);
+                    const clock = minute => `${String(Math.floor(minute/60)%24).padStart(2,'0')}:${String(minute%60).padStart(2,'0')}`;
+                    trips.push(...transfers.map(trip => ({...trip,start_min:trip.start_min-dayStart,end_min:trip.end_min-dayStart,
+                      start:clock(trip.start_min),end:clock(trip.end_min)})));
+                    trips.sort((a,b) => a.start_min-b.start_min);
+                  }
                   
                   // For multi-day scenarios, replicate the trip sequence for the second day if not provided
                   if (simHours > 24 && trips.length > 0) {

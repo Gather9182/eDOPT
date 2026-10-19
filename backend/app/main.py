@@ -6,6 +6,7 @@ from .services.price_service import PriceService, AWattarProvider
 from .utils.excel_processor import process_umlauf_excel, scan_umlauf_excel
 from .services.charging_sites import validate_sites
 from .services.feasibility import energy_feasibility_issues
+from .services.opportunity_charging import possible_availability
 from fastapi import UploadFile, File, Form
 
 app = FastAPI(title="eDOPT Optimization API")
@@ -51,9 +52,11 @@ async def validate_inputs(inputs: OptimizationInputs):
     Validates the input data structure and internal consistency.
     """
     issues = []
+    sites_valid = True
     try:
         validate_sites(inputs)
     except ValueError as exc:
+        sites_valid = False
         issues.append({'type': 'ERROR', 'message': str(exc)})
     num_periods = int((inputs.planning_horizon_hours * 60) / inputs.time_step_minutes)
     
@@ -94,7 +97,7 @@ async def validate_inputs(inputs: OptimizationInputs):
             })
 
         # Check if bus is never available
-        if sum(bus.availability) == 0:
+        if len(bus.availability) == len(inputs.electricity_prices) and not any(possible_availability(bus, inputs) if sites_valid else bus.availability):
             issues.append({
                 "type": "WARNING",
                 "code": "NO_CHARGING_AVAILABILITY",
