@@ -54,9 +54,7 @@ def energy_feasibility_issues(inputs):
         for t, energy in enumerate(bus.trip_energy_profile_kwh):
             power = 0
             if availability[t]:
-                power = min(bus.max_power_kw, inputs.charger_capacity_kw)
-                if inputs.scenario == 'baseline':
-                    power = min(power, inputs.grid_limit_kw)
+                power = bus.max_power_kw
                 if inputs.charging_sites:
                     site_limits = []
                     for site in inputs.charging_sites:
@@ -67,8 +65,12 @@ def energy_feasibility_issues(inputs):
                                 limit = min(limit, site.grid_limit_kw)
                             site_limits.append(limit)
                     power = min(power, max(site_limits, default=0))
-                elif inputs.num_chargers <= 0:
-                    power = 0
+                else:
+                    power = min(power, inputs.charger_capacity_kw)
+                    if inputs.scenario == 'baseline':
+                        power = min(power, inputs.grid_limit_kw)
+                    if inputs.num_chargers <= 0:
+                        power = 0
             # Match the solver's interval-end capacity bound, including legacy
             # profiles with charging and consumption during the same interval.
             soc = min(upper, soc + max(0, power) * dt * bus.efficiency - energy)

@@ -965,6 +965,7 @@ const UmlaufplanTab = ({
 };
 
 const ConstraintsTab = ({ projectData, setProjectData, activeExcelData, availableVehicleTypes }) => {
+  const siteLimitsActive = Boolean(projectData.charging?.enabled && projectData.charging.sites?.length);
   const handleChange = (field, value) => {
     setProjectData(prev => ({
       ...prev,
@@ -1016,6 +1017,7 @@ const ConstraintsTab = ({ projectData, setProjectData, activeExcelData, availabl
             <Settings size={18} />
             Depot Infrastructure
           </h3>
+          {siteLimitsActive && <p className="text-sm text-muted mb-4">Location limits are active. Grid connection, charging capacity and connector counts are configured per location. The legacy depot fields below are ignored.</p>}
           
           <div className="space-y-6 flex-1">
             <div className="form-group mb-0">
@@ -1028,6 +1030,7 @@ const ConstraintsTab = ({ projectData, setProjectData, activeExcelData, availabl
                 type="number" 
                 style={{ width: '150px' }}
                 value={projectData.constraints.charger_capacity_kw} 
+                disabled={siteLimitsActive}
                 onChange={(e) => handleChange('charger_capacity_kw', e.target.value)}
               />
             </div>
@@ -1041,6 +1044,7 @@ const ConstraintsTab = ({ projectData, setProjectData, activeExcelData, availabl
                 type="number" 
                 style={{ width: '150px' }}
                 value={projectData.constraints.grid_limit_kw} 
+                disabled={siteLimitsActive}
                 onChange={(e) => handleChange('grid_limit_kw', e.target.value)}
               />
             </div>
@@ -1054,6 +1058,7 @@ const ConstraintsTab = ({ projectData, setProjectData, activeExcelData, availabl
                 type="number" 
                 style={{ width: '150px' }}
                 value={projectData.constraints.num_chargers || 50} 
+                disabled={siteLimitsActive}
                 onChange={(e) => handleChange('num_chargers', e.target.value)}
               />
             </div>

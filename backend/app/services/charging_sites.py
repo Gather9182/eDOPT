@@ -206,7 +206,6 @@ def simulate_site_baseline(inputs, minimum_soc_deviation=None):
                     continue
                 kw = max(0, min(bus.max_power_kw, site.charger_power_kw,
                                site.grid_limit_kw - site_kw, site.charger_capacity_kw - site_kw,
-                               inputs.grid_limit_kw - load[t], inputs.charger_capacity_kw - load[t],
                                (preferred_maximum(inputs, bus) - soc[bus.id]) / (dt * bus.efficiency)))
                 site_kw += kw
                 load[t] += kw

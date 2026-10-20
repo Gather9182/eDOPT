@@ -25,6 +25,7 @@ const InfoTooltip = ({ title, text, align = 'center' }) => (
 );
 
 const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
+  const siteLimitsActive = Boolean(projectData.charging?.enabled && projectData.charging.sites?.length);
   const [status, setStatus] = useState('ready'); // ready, running, success
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState([]);
@@ -1607,6 +1608,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
 
             <div className="card shadow-sm">
               <h3 className="card-title text-primary flex items-center gap-2"><Zap size={18} className="text-primary" /> Depot Infrastructure</h3>
+              {siteLimitsActive && <p className="text-sm text-muted">Location limits are active. Each location uses its own grid and charging capacity. The legacy limits below are ignored.</p>}
               <div className="grid grid-cols-3 gap-x-4 gap-y-4 mt-4">
                 <div className="form-group mb-0">
                   <div className="flex items-center justify-between mb-1">
@@ -1617,6 +1619,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                     type="number"
                     className="form-input text-xs h-9" 
                     value={localSettings.charger_capacity_kw}
+                    disabled={siteLimitsActive}
                     onChange={(e) => setLocalSettings(prev => ({ ...prev, charger_capacity_kw: Number(e.target.value) }))}
                   />
                 </div>
@@ -1630,6 +1633,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                     type="number"
                     className="form-input text-xs h-9"
                     value={localSettings.grid_limit_kw}
+                    disabled={siteLimitsActive}
                     onChange={(e) => setLocalSettings(prev => ({ ...prev, grid_limit_kw: Number(e.target.value) }))}
                   />
                 </div>

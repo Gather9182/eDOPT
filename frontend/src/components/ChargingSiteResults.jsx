@@ -1,6 +1,7 @@
 import CustomSelect from './CustomSelect';
 import React, { useState } from 'react';
 import { chargingOriginAt } from '../utils/chargingOrigin';
+import ResultInfoCard from './ResultInfoCard';
 
 export default function ChargingSiteResults({ results, day = null }) {
   const [selectedBus, setSelectedBus] = useState('');
@@ -15,28 +16,34 @@ export default function ChargingSiteResults({ results, day = null }) {
   const buses = Object.keys(results.connection_schedules || {});
   const bus = buses.includes(selectedBus) ? selectedBus : buses[0];
   const visits = (results.opportunity_charging_visits || []).filter(visit => day === null || Math.floor(visit.departure_min/1440) === day);
-  const clock = minute => `Tag ${Math.floor(minute/1440)+1}, ${String(Math.floor(minute/60)%24).padStart(2,'0')}:${String(minute%60).padStart(2,'0')}`;
-  return <div className="card p-6 mb-6">
-    <h2 className="text-lg font-bold mb-3">Ladeorte und Anschlussbelegung</h2>
-    <div style={{ overflowX: 'auto' }}><table className="data-table"><thead><tr><th>Ladeort</th><th>Geladen (kWh)</th><th>Spitzenleistung (kW)</th><th>Max. belegte Ladepunkte</th></tr></thead><tbody>
-      {ids.map(id => { const p = profiles[id].slice(from,to); return <tr key={id}><td>{name(id)}</td><td>{(p.reduce((a,b) => a+b,0)*step/60).toFixed(1)}</td><td>{Math.max(0,...p).toFixed(1)}</td><td>{Math.max(0,...(results.site_occupied_connectors?.[id] || []).slice(from,to))}</td></tr>; })}
+  const clock = minute => `Day ${Math.floor(minute/1440)+1}, ${String(Math.floor(minute/60)%24).padStart(2,'0')}:${String(minute%60).padStart(2,'0')}`;
+  const energy = ids.reduce((sum,id) => sum + profiles[id].slice(from,to).reduce((a,b) => a+b,0)*step/60,0);
+  return <ResultInfoCard title="Charging locations & connector use" status={day === null ? 'Full run' : `Day ${day + 1}`}
+    summary={`${ids.length} locations · ${energy.toFixed(1)} kWh delivered to chargers · ${visits.length} selected charging detours`}>
+    <div className="result-info-metrics">
+      <div><span>Charging locations</span><strong>{ids.length}</strong></div>
+      <div><span>Energy delivered to chargers</span><strong>{energy.toFixed(1)} kWh</strong></div>
+      <div><span>Selected charging detours</span><strong>{visits.length}<small>{visits.reduce((sum,visit) => sum + visit.distance_km,0).toFixed(1)} additional km</small></strong></div>
+    </div>
+    <div className="result-info-table-scroll"><table className="data-table result-info-table"><thead><tr><th>Location</th><th className="numeric">Charger energy (kWh)</th><th className="numeric">Peak charging power (kW)</th><th className="numeric">Peak occupied connectors</th></tr></thead><tbody>
+      {ids.map(id => { const p = profiles[id].slice(from,to); return <tr key={id}><td className="result-info-route">{name(id)}</td><td className="numeric">{(p.reduce((a,b) => a+b,0)*step/60).toFixed(1)}</td><td className="numeric">{Math.max(0,...p).toFixed(1)}</td><td className="numeric">{Math.max(0,...(results.site_occupied_connectors?.[id] || []).slice(from,to))}</td></tr>; })}
     </tbody></table></div>
-    {visits.length > 0 && <details className="mt-4" open><summary>Gewählte Zusatzladefahrten ({visits.length})</summary>
-      <p className="text-sm text-muted mb-2">Fahrplanfahrten bleiben unverändert. Die Zusatzenergie und Kilometer der Hin- und Rückfahrt werden nur bei gewählten Fahrten berücksichtigt. Die Vergleichsstrategie „Laden bei Ankunft“ nutzt keine optionalen Zusatzfahrten.</p>
-      <div style={{overflowX:'auto'}}><table className="data-table"><thead><tr><th>Umlauf</th><th>Ladeort</th><th>Hinfahrt ab</th><th>Am Ladeort</th><th>Rückfahrt ab</th><th>Zurück am Knoten</th><th>Geladen (Batterie-kWh)</th><th>Zusatzverbrauch (kWh)</th><th>Netto-Gewinn (kWh)</th><th>Zusatz-km</th></tr></thead><tbody>
-        {visits.map((visit,i) => <tr key={i}><td>{visit.bus_id}</td><td>{name(visit.site_id)}</td><td>{clock(visit.departure_min)}</td><td>{clock(visit.charger_arrival_min)}</td><td>{clock(visit.return_departure_min)}</td><td>{clock(visit.return_arrival_min)}</td><td>{(visit.battery_charged_kwh ?? visit.charged_kwh).toFixed(1)}</td><td>{visit.travel_energy_kwh.toFixed(1)}</td><td>{(visit.net_energy_gain_kwh ?? 0).toFixed(1)}</td><td>{visit.distance_km.toFixed(1)}</td></tr>)}
+    {visits.length > 0 && <details className="result-info-details"><summary>View selected charging detours <span className="result-info-count">{visits.length}</span></summary>
+      <p className="result-info-note">Scheduled trips remain unchanged. Only selected detours add travel energy and distance. The charge-on-arrival reference does not use optional detours. Outbound and return times include both ends of each journey.</p>
+      <div className="result-info-table-scroll"><table className="data-table result-info-table"><thead><tr><th>Route / location</th><th>Outbound journey</th><th>Return journey</th><th className="numeric">Battery energy<br />(kWh)</th><th className="numeric">Travel energy<br />(kWh)</th><th className="numeric">Net gain<br />(kWh)</th><th className="numeric">Extra distance<br />(km)</th></tr></thead><tbody>
+        {visits.map((visit,i) => <tr key={i}><td className="result-info-route">{visit.bus_id}<small className="result-info-subtext">{name(visit.site_id)}</small></td><td className="result-info-nowrap">{clock(visit.departure_min)}<small className="result-info-subtext">→ {clock(visit.charger_arrival_min)}</small></td><td className="result-info-nowrap">{clock(visit.return_departure_min)}<small className="result-info-subtext">→ {clock(visit.return_arrival_min)}</small></td><td className="numeric">{(visit.battery_charged_kwh ?? visit.charged_kwh).toFixed(1)}</td><td className="numeric">{visit.travel_energy_kwh.toFixed(1)}</td><td className="numeric">{(visit.net_energy_gain_kwh ?? 0).toFixed(1)}</td><td className="numeric">{visit.distance_km.toFixed(1)}</td></tr>)}
       </tbody></table></div>
     </details>}
-    <details className="mt-4"><summary>Anschlussbelegung eines Busses anzeigen</summary>
-      <label>Umlauf <CustomSelect aria-label="Anschlussbelegung Umlauf" className="form-input" value={bus || ''} onChange={e => setSelectedBus(e.target.value)}>{buses.map(id => <option key={id}>{id}</option>)}</CustomSelect></label>
-      <p className="text-sm text-muted mb-2">Ein Anschluss bleibt auch bei 0 kW belegt. Angezeigt werden bis zu 192 Zeitschritte des ausgewählten Zeitraums; vollständige Daten stehen im Export.</p>
-      <div style={{ maxHeight: 320, overflow: 'auto' }}><table className="data-table"><thead><tr><th>Zeit</th><th>Anschluss am Ladeort</th><th>Ladeleistung (kW)</th><th>Charging origin</th></tr></thead><tbody>{(results.connection_schedules[bus] || []).slice(from,Math.min(to,from+192)).map((site, i) => {
+    <details className="result-info-details"><summary>View connector use by route</summary>
+      <label className="result-info-selector">Route <CustomSelect aria-label="Connector use route" className="form-input" value={bus || ''} onChange={e => setSelectedBus(e.target.value)}>{buses.map(id => <option key={id}>{id}</option>)}</CustomSelect></label>
+      <p className="result-info-note">A connector remains occupied even at 0 kW. Up to 192 time steps of the selected period are shown. The export contains all time steps.</p>
+      <div className="result-info-table-scroll"><table className="data-table result-info-table"><thead><tr><th>Time</th><th>Connected at</th><th className="numeric">Charging power (kW)</th><th>Charging origin</th></tr></thead><tbody>{(results.connection_schedules?.[bus] || []).slice(from,Math.min(to,from+192)).map((site, i) => {
         const t=from+i;
         const minutes=t*step;
         const schedule=results.is_long_term ? results.schedules_by_day?.[Math.floor(minutes/1440)]?.[bus]?.[t%(1440/step)] : results.schedules?.[bus]?.[t];
         const origin = schedule > 0.001 ? chargingOriginAt(results,bus,minutes) : null;
-        return <tr key={t}><td>{clock(minutes)}</td><td>{site ? name(site) : 'Nicht angeschlossen'}</td><td>{(schedule || 0).toFixed(1)}</td><td>{origin ? <span title={origin.explanation} className={`charging-origin-badge charging-origin-${origin.origin}`}>{origin.badge}</span> : site ? 'Connected, not charging' : '—'}</td></tr>;
+        return <tr key={t}><td className="result-info-nowrap">{clock(minutes)}</td><td>{site ? name(site) : 'Not connected'}</td><td className="numeric">{(schedule || 0).toFixed(1)}</td><td>{origin ? <span title={origin.explanation} className={`charging-origin-badge charging-origin-${origin.origin}`}>{origin.badge}</span> : site ? 'Connected, not charging' : '—'}</td></tr>;
       })}</tbody></table></div>
     </details>
-  </div>;
+  </ResultInfoCard>;
 }

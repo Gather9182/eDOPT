@@ -88,7 +88,24 @@ shared with the proven optimum do not automatically invalidate the reference.
 The no-site arrival heuristic now checks un-clamped energy and final readiness.
 Historical heuristic fallback results are not validated reference comparisons.
 
-## Import
+## Independent charging location limits
+
+When `charging_sites` contains configured locations, each location's grid
+connection, aggregate charger capacity, connector power and connector count
+are enforced independently. Legacy `grid_limit_kw`, `charger_capacity_kw`
+and `num_chargers` do not impose additional fleet-wide caps. This also applies
+to a single explicitly configured location. Without configured locations,
+the original single-depot limits remain active.
+
+Both MILP formulations, energy prechecks, isolated route diagnostics and
+arrival reference charging use this scope. PV and BESS remain tied to the
+selected energy location; its net grid import (including storage charging)
+is limited by that location's connection. They cannot supply other locations.
+Inactive legacy controls are disabled in Input and Optimization settings.
+Previous results are historical; rerun checks and optimization to apply this
+change, and restore previously excluded routes to reassess them.
+
+## Distance import
 
 All existing unit modes remain selectable. Explicit unit suffixes are honoured;
 unreadable, missing, negative or nonfinite distances are rejected with sheet,

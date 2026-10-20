@@ -100,6 +100,69 @@ class PhysicalChargingTests(unittest.TestCase):
         for profile in result.site_load_profiles.values():
             self.assertTrue(all(v <= 40.001 for v in profile))
 
+    def test_location_limits_replace_legacy_limits_in_all_scenarios(self):
+        from app.main import validate_inputs
+        from app.services.solver import run_scenario_optimization
+        for scenario in ('baseline', 'pv', 'bess', 'pv_bess'):
+            with self.subTest(scenario=scenario):
+                # Both locations must supply 20 kWh in one hour, despite zero
+                # unused legacy capacity and zero legacy connector count.
+                data = inputs([bus('a','A'), bus('b','B')], [site('A'), site('B')],
+                              grid_limit_kw=0, charger_capacity_kw=0, num_chargers=0,
+                              scenario=scenario, energy_site_id='A',
+                              pv_config=dict(capacity_kw=1, profile_kwh=[0]*4))
+                checked = run_offline(validate_inputs(data))
+                self.assertEqual(checked['status'], 'valid', checked)
+                result = run_offline(run_scenario_optimization(data, []))
+                self.assertAlmostEqual(sum(result.grid_import_profile)/4, 40)
+                self.assertTrue(result.baseline_feasible)
+                for identifier in ('a', 'b'):
+                    self.assertAlmostEqual(result.soc_profiles[identifier][-1], 20)
+                for profile in result.site_grid_import_profiles.values():
+                    self.assertTrue(all(v <= 40.001 for v in profile))
+
+    def test_one_configured_site_also_replaces_legacy_limits(self):
+        result = self.solve(inputs([bus('a')], grid_limit_kw=0, charger_capacity_kw=0))
+        self.assertAlmostEqual(result.soc_profiles['a'][-1], 20)
+
+    def test_local_pv_and_storage_do_not_depend_on_legacy_grid_limit(self):
+        for scenario in ('pv', 'bess', 'pv_bess'):
+            with self.subTest(scenario=scenario):
+                data = inputs([bus('a','A'), bus('b','B')],
+                              [{**site('A'), 'grid_limit_kw':0}, site('B')],
+                              scenario=scenario, energy_site_id='A',
+                              grid_limit_kw=0, charger_capacity_kw=0,
+                              pv_config=dict(capacity_kw=40, profile_kwh=[40]*4),
+                              bess_config=dict(capacity_kwh=20, initial_soc_kwh=20,
+                                               min_soc_kwh=0, max_soc_kwh=20,
+                                               max_charge_power_kw=40, max_discharge_power_kw=40, efficiency=1))
+                result = self.solve(data, extended=True)
+                self.assertTrue(all(abs(v) < .001 for v in result.site_grid_import_profiles['A']))
+                self.assertAlmostEqual(sum(result.site_grid_import_profiles['B'])/4, 20)
+                for identifier in ('a', 'b'):
+                    self.assertAlmostEqual(result.soc_profiles[identifier][-1], 20)
+
+    def test_local_grid_and_charger_limits_remain_independent(self):
+        for extended in (False, True):
+            for limited_field in ('grid_limit_kw', 'charger_capacity_kw'):
+                with self.subTest(extended=extended, limited_field=limited_field):
+                    # A has spare capacity, but cannot supply B's independent connection.
+                    sites = [site('A'), {**site('B'), limited_field: 10}]
+                    data = inputs([bus('a','A'), bus('b','B')], sites,
+                                  scenario='pv' if extended else 'baseline', energy_site_id='A',
+                                  pv_config=dict(capacity_kw=0, profile_kwh=[0]*4))
+                    with self.assertRaisesRegex(RuntimeError, 'Infeasible'):
+                        self.solve(data, extended=extended)
+
+    def test_legacy_depot_still_enforces_grid_and_charger_limits(self):
+        for extended in (False, True):
+            for limited_field in ('grid_limit_kw', 'charger_capacity_kw'):
+                with self.subTest(extended=extended, limited_field=limited_field):
+                    data = inputs([bus('a')], charging_sites=[], **{limited_field: 10},
+                                  pv_config=dict(capacity_kw=0, profile_kwh=[0]*4))
+                    with self.assertRaisesRegex(RuntimeError, 'Infeasible'):
+                        self.solve(data, extended=extended)
+
     def test_pv_cannot_supply_a_different_site(self):
         data = inputs([bus('a','B')], [site('A'),{**site('B'), 'grid_limit_kw':0}],
                       scenario='pv', energy_site_id='A', pv_config=dict(capacity_kw=100,profile_kwh=[100]*4))

@@ -114,8 +114,8 @@ class OptimizationInputs(BaseModel):
     buses: List[BusUmlauf]
     electricity_prices: List[float] = Field(..., description="Effective Price per MWh (incl. markups) (p_t)")
     market_prices: List[float] = Field(default_factory=list, description="Original wholesale Market Price per MWh")
-    charger_capacity_kw: float = Field(..., description="Aggregate depot charger limit (C_max)")
-    grid_limit_kw: float = Field(..., description="Depot grid connection limit (G_max)")
+    charger_capacity_kw: float = Field(..., description="Legacy single-depot charger limit; ignored when charging_sites are configured")
+    grid_limit_kw: float = Field(..., description="Legacy single-depot grid connection limit; ignored when charging_sites are configured")
     initial_soc_fraction: float = Field(1.0, description="Default initial SoC fraction if not specified per bus")
     min_final_soc_fraction: float = Field(0.2, description="Default minimum final SoC fraction if not specified per bus")
     num_chargers: int = Field(50, description="Number of simultaneous charging sockets available (S_max)")

@@ -430,12 +430,13 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
         prob += (pv_used[t] == pv_to_bus[t] + pv_to_bess[t])
         
         # Grid Limit applies to the net import
-        prob += (grid_import[t] <= inputs.grid_limit_kw)
+        if not inputs.charging_sites:
+            prob += (grid_import[t] <= inputs.grid_limit_kw)
         
         # Socket limits (Original bus charger constraints)
         if not inputs.charging_sites:
             prob += (pulp.lpSum(z_vars[(bus.id, t)] for bus in inputs.buses) <= inputs.num_chargers)
-        prob += (total_bus_p <= inputs.charger_capacity_kw)
+            prob += (total_bus_p <= inputs.charger_capacity_kw)
 
     site_state = add_site_constraints(prob, inputs, p_vars, grid_import, (pv_used, b_charge, b_discharge), opportunities)
     if site_state:
@@ -614,10 +615,10 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
         add_end_condition(prob, inputs, bus, soc_vars[(bus.id, num_periods)], bi)
 
     for t in range(num_periods):
-        prob += (pulp.lpSum(p_vars[(bus.id, t)] for bus in inputs.buses) <= inputs.grid_limit_kw), f'global_grid_t{t}'
         if not inputs.charging_sites:
+            prob += (pulp.lpSum(p_vars[(bus.id, t)] for bus in inputs.buses) <= inputs.grid_limit_kw), f'global_grid_t{t}'
             prob += (pulp.lpSum(z_vars[(bus.id, t)] for bus in inputs.buses) <= inputs.num_chargers)
-        prob += (pulp.lpSum(p_vars[(bus.id, t)] for bus in inputs.buses) <= inputs.charger_capacity_kw), f'global_charging_t{t}'
+            prob += (pulp.lpSum(p_vars[(bus.id, t)] for bus in inputs.buses) <= inputs.charger_capacity_kw), f'global_charging_t{t}'
 
     site_state = add_site_constraints(prob, inputs, p_vars, opportunities=opportunities)
     if site_state:

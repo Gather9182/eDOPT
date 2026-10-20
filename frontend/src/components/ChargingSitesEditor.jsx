@@ -20,7 +20,7 @@ export default function ChargingSitesEditor({ projectData, setProjectData, nodes
     <label className="flex items-center gap-2 mb-3"><input type="checkbox" checked={Boolean(config.enabled)} onChange={e => update({ enabled: e.target.checked })} /> Ladeorte getrennt berücksichtigen</label>
     <p className="text-sm text-muted mb-4">Ordne Fahrplanknoten einem physischen Ladeort zu. Einfahrt und Ausfahrt desselben Depots gehören zum selben Ort. Mit „Continue to Settings“ werden die aktuellen Knotenzuordnungen automatisch verarbeitet und übernommen.</p>
     {config.enabled && <>
-      <p className="text-sm mb-4">Die bisherigen Gesamtgrenzen für Netz- und Ladeleistung gelten zusätzlich für die gesamte Flotte. Ladepunktzahlen gelten je Ort.</p>
+      <p className="text-sm mb-4">Each location uses its own grid connection, charging power and connector limits. The legacy depot limits are not applied when locations are configured. PV and battery storage supply only their selected location.</p>
       <div className="flex gap-2 mb-4" style={{ flexWrap: 'wrap' }}>
         <button className="btn btn-outline" onClick={() => update({ sites: [...sites, create()] })}>Ladeort hinzufügen</button>
         <button className="btn btn-outline" disabled={!selectedAE.length} title={selectedAE.length ? `${selectedAE.length} ausgewählte A/E-Knoten aus dem Umlaufplan übernehmen` : 'Zuerst A/E-Knoten im Pill-Selector des Umlaufplans auswählen.'} onClick={() => addDepotNodes(selectedAE)}>Ausgewählte A/E-Knoten übernehmen ({selectedAE.length})</button>

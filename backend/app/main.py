@@ -95,9 +95,9 @@ async def validate_inputs(inputs: OptimizationInputs, include_diagnostics: bool 
         })
 
     # Check 2: Constraint plausibility
-    if inputs.charger_capacity_kw <= 0:
+    if not inputs.charging_sites and inputs.charger_capacity_kw <= 0:
         issues.append({"type": "ERROR", "code": "CHARGER_CAPACITY_INVALID", "category": "infrastructure", "message": "Total charger capacity must be greater than 0."})
-    if inputs.grid_limit_kw <= 0:
+    if not inputs.charging_sites and inputs.grid_limit_kw <= 0:
         issues.append({"type": "ERROR", "code": "GRID_LIMIT_INVALID", "category": "infrastructure", "message": "Grid connection limit must be greater than 0."})
 
     # Check 3: Bus data validation
@@ -113,7 +113,7 @@ async def validate_inputs(inputs: OptimizationInputs, include_diagnostics: bool 
             issues.append({"type": "ERROR", "code": "BUS_EFFICIENCY_INVALID", "category": "vehicle", "bus_id": bus.id, "message": f"Bus {bus.id}: Efficiency must be between 0 and 1 (current: {bus.efficiency})"})
 
         # Power vs Capacity check
-        if bus.max_power_kw > inputs.charger_capacity_kw:
+        if not inputs.charging_sites and bus.max_power_kw > inputs.charger_capacity_kw:
             issues.append({"type": "WARNING", "code": "BUS_POWER_EXCEEDS_SITE_CAPACITY", "category": "infrastructure", "bus_id": bus.id, "message": f"Bus {bus.id}: Individual charging power ({bus.max_power_kw}kW) exceeds total depot charger capacity ({inputs.charger_capacity_kw}kW)."})
 
         # Check availability vector length

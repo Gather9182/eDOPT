@@ -42,7 +42,8 @@ async def run_optimization(inputs: OptimizationInputs) -> OptimizationResult:
             raise OptimizationFailure(f'No feasible charging schedule for the current charging locations and switching restrictions: {err_str}. '
                                'Excluding routes without charging windows does not guarantee feasibility. '
                                'Even if each bus has sufficient energy individually, shared connectors, charging power, grid capacity '
-                               'or switching restrictions can limit the fleet. Global power limits apply in addition to site limits.',
+                               'or switching restrictions can limit the fleet. Configured charging locations use their own power and grid limits; '
+                               'legacy depot limits apply only without configured locations.',
                                diagnostics) from e
         print(f"Solver failed: {err_str}. Falling back to heuristic.")
         res = await run_placeholder_optimization(inputs, solver_logs, error_msg=err_str)
