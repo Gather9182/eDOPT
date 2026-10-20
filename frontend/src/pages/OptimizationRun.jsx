@@ -1,4 +1,5 @@
 import CustomSelect from '../components/CustomSelect';
+import OptimizationProgress from '../components/OptimizationProgress';
 import ChargingCurveSettings from '../components/ChargingCurveSettings';
 import {chargingCurveIssues} from '../utils/chargingCurve';
 import {socPolicyInputs, socPolicyIssues, mergeSocPolicies, endConditionPatch, endConditionIssues} from '../utils/socPolicy';
@@ -33,7 +34,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
   const [logs, setLogs] = useState([]);
   const [runStartTime, setRunStartTime] = useState(null);
   const [timeLeftText, setTimeLeftText] = useState('');
-  const targetEndTimeRef = useRef(null);
+  const [solverPending, setSolverPending] = useState(false);
+  const [liveProgress, setLiveProgress] = useState(null);
   const [scenario, setScenario] = useState(projectData.meta.scenario || 'baseline');
   const [pvConfig, setPvConfig] = useState(projectData.constraints?.pv_config || {
     capacity_kw: 0,
@@ -200,18 +202,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     }
   }, [logs]);
 
-  // Update targetEndTime when progress changes
-  useEffect(() => {
-    if (status === 'running' && runStartTime && progress > 5 && progress < 100) {
-      const elapsed = Date.now() - runStartTime;
-      const estimatedTotal = (elapsed / progress) * 100;
-      targetEndTimeRef.current = runStartTime + estimatedTotal;
-    } else {
-      targetEndTimeRef.current = null;
-    }
-  }, [progress, status, runStartTime]);
-
-  // Timer to update timeLeftText every second
+  // Report elapsed time only: request phases are not solver progress estimates.
   useEffect(() => {
     if (status !== 'running') {
       setTimeLeftText('');
@@ -219,29 +210,20 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     }
 
     const updateTimer = () => {
-      if (!targetEndTimeRef.current) {
-        setTimeLeftText('Estimating remaining time...');
-        return;
-      }
-      const diff = targetEndTimeRef.current - Date.now();
-      if (diff <= 0) {
-        setTimeLeftText('Finishing up...');
-        return;
-      }
-      const totalSeconds = Math.round(diff / 1000);
+      const totalSeconds = Math.max(0,Math.floor((Date.now() - (runStartTime || Date.now())) / 1000));
       const minutes = Math.floor(totalSeconds / 60);
       const seconds = totalSeconds % 60;
       if (minutes > 0) {
-        setTimeLeftText(`Estimated time left: ${minutes}m ${seconds}s`);
+        setTimeLeftText(`Elapsed: ${minutes}m ${seconds}s`);
       } else {
-        setTimeLeftText(`Estimated time left: ${seconds}s`);
+        setTimeLeftText(`Elapsed: ${seconds}s`);
       }
     };
 
     updateTimer();
     const interval = setInterval(updateTimer, 1000);
     return () => clearInterval(interval);
-  }, [status]);
+  }, [status, runStartTime]);
 
   const addLog = (msg) => {
     logsRef.current = [...logsRef.current, { time:new Date().toLocaleTimeString(), msg }];
@@ -256,7 +238,23 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
   const requestOptimization = async (inputs, attempt = {}) => {
     optimizationAttemptRef.current = {context:{...(analysisRunRef.current?.context || failureContext()),checked_at:new Date().toISOString()},request:diagnosticClone(inputs),
       attempt:{scenario:inputs.scenario,mode:simulationMode,...attempt}};
-    const result = await callOptimizeApi(inputs);
+    setSolverPending(true);
+    setLiveProgress(null);
+    let lastEventSequence = 0;
+    let result;
+    try {
+      result = await callOptimizeApi(inputs,{onProgress:state => {
+        setLiveProgress(state);
+        for (const event of state.events || []) {
+          if (event.sequence > lastEventSequence) {
+            addLog(event.message);
+            lastEventSequence = event.sequence;
+          }
+        }
+      }});
+    } finally {
+      setSolverPending(false);
+    }
     if (attempt.chunk_number && analysisRunRef.current) {
       const record = await archiveChunkRequest(optimizationAttemptRef.current.request,attempt,analysisRunRef.current.id,setItem,result);
       analysisRunRef.current.requests.push(record);
@@ -2130,16 +2128,17 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             <Loader2 size={48} className="running-spinner" />
           </div>
           <h2 className="text-xl font-bold">Optimizing Schedule...</h2>
-          <p className="text-secondary">Solving MILP for cost minimization</p>
-          <div className="progress-bar-container">
-            <div className="progress-bar" style={{ width: `${progress}%` }}></div>
+          <p className="text-secondary" role="status">{solverPending ? 'Computing charging schedule...' : progress >= 80 ? 'Preparing results...' : 'Preparing optimization...'}</p>
+          <div className="progress-bar-container" role="progressbar" aria-label="Optimization in progress">
+            <div className="progress-bar progress-bar-indeterminate"></div>
           </div>
-          <span className="progress-text">{progress}%</span>
+          <p className="text-sm text-muted" style={{maxWidth:520,margin:'12px auto 0'}}>Live backend phases and solver evidence are shown below. The optimization gap is not a completion percentage.</p>
           {timeLeftText && (
             <div className="time-left-text" style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '8px', fontWeight: '650', letterSpacing: '0.02em' }}>
               {timeLeftText}
             </div>
           )}
+          <OptimizationProgress state={liveProgress} />
         </div>
       )}
 
@@ -2304,6 +2303,26 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           height: 100%;
           background: var(--primary);
           transition: width 0.2s ease;
+        }
+
+        .progress-bar-indeterminate {
+          width: 35%;
+          animation: optimization-activity 1.6s ease-in-out infinite;
+        }
+        .optimization-live-panel {
+          width: 100%; max-width: 850px; margin: 24px auto 0;
+          padding: 20px; text-align: left; border: 1px solid var(--border-light);
+          border-radius: 12px; background: var(--bg-surface);
+        }
+        .optimization-live-log { padding: 12px; background: var(--bg-app); border-radius: 8px; }
+        .optimization-live-log span { display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+        .optimization-live-log code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+        @keyframes optimization-activity {
+          from { transform: translateX(-100%); }
+          to { transform: translateX(390%); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .progress-bar-indeterminate { animation: none; width: 100%; opacity: .45; }
         }
 
         .log-window {

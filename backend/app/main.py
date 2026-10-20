@@ -14,6 +14,24 @@ from importlib.metadata import version, PackageNotFoundError
 import platform
 
 app = FastAPI(title="eDOPT Optimization API")
+from .services.optimization_progress import OptimizationJobs
+optimization_jobs = OptimizationJobs()
+
+
+@app.post('/api/optimize/jobs', status_code=202)
+def start_optimization_job(inputs: OptimizationInputs):
+    try:
+        return {'job_id':optimization_jobs.submit(inputs)}
+    except RuntimeError as error:
+        raise HTTPException(status_code=429,detail=str(error))
+
+
+@app.get('/api/optimize/jobs/{job_id}')
+def optimization_job_status(job_id: str):
+    try:
+        return optimization_jobs.get(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404,detail='Optimization job is unavailable. The backend may have restarted or the report expired. No new run was started automatically.')
 
 # Configure CORS for local development
 from pydantic import BaseModel

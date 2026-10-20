@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pulp
+from .optimization_progress import current_progress, report_progress
 
 route_solve_deadline = ContextVar('route_solve_deadline', default=None)
 
@@ -42,6 +43,7 @@ def energy_relaxation(problem, inputs):
     This is one minimum-shortfall explanation, not an IIS or an infrastructure
     sizing recommendation. A positive deficit cannot be used as a real charge.
     """
+    report_progress('energy_diagnostics','Analyzing energy shortfalls in the failed model.',metrics={})
     diagnostic = copy.deepcopy(problem)
     injections = []
     for bi, bus in enumerate(inputs.buses):
@@ -90,11 +92,16 @@ def solve_with_diagnostics(problem, inputs, solver_logs=None):
         raise OptimizationFailure(f'Individual check ended with status: {status}', dict(solver_status=status))
     with diagnostic_paths() as (log_path, model_path):
         execution_error = None
+        progress = current_progress.get()
+        if progress:
+            progress.start_solver(log_path,problem,180)
         try:
             problem.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=180, logPath=str(log_path)))
         except Exception as error:
             execution_error = str(error)
         status = 'Solver error' if execution_error is not None else pulp.LpStatus[problem.status]
+        if progress:
+            progress.finish_solver(status)
         if status in {'Optimal', 'Feasible'}:
             return
         logs = list(solver_logs or []) + [f'[Solver] CBC ended with status: {status}.']

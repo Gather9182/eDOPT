@@ -8,6 +8,7 @@ from .feasibility import energy_feasibility_issues
 from .solver_diagnostics import OptimizationFailure
 from .route_feasibility import classify_routes
 from .soc_policy import policy_active
+from .optimization_progress import report_progress
 
 async def run_optimization(inputs: OptimizationInputs) -> OptimizationResult:
     """
@@ -15,6 +16,7 @@ async def run_optimization(inputs: OptimizationInputs) -> OptimizationResult:
     Routes to the scenario-aware MILP solver.
     """
     solver_logs = []
+    report_progress('precheck','Checking input data and optimistic energy bounds.',metrics={})
     energy_issues = energy_feasibility_issues(inputs) if inputs.charging_sites or policy_active(inputs) else []
     if energy_issues:
         raise OptimizationFailure('No feasible charging schedule: ' + '\n'.join(issue['message'] for issue in energy_issues),

@@ -32,16 +32,16 @@ def max_curve_energy(inputs, bus, initial_kwh, cap_kw, hours, charger_power_kw=N
     return max(0, energy - start)
 
 
-def _weights(problem, energy, points, prefix):
-    """Exact adjacent-point interpolation; supports non-monotone power curves."""
-    weights = [pulp.LpVariable(f'{prefix}_w{i}', lowBound=0, upBound=1) for i in range(len(points))]
-    segments = [pulp.LpVariable(f'{prefix}_s{i}', cat='Binary') for i in range(len(points)-1)]
-    problem += pulp.lpSum(weights) == 1
-    problem += pulp.lpSum(segments) == 1
-    problem += energy == pulp.lpSum(point * weight for point, weight in zip(points, weights))
-    for i, weight in enumerate(weights):
-        problem += weight <= pulp.lpSum(segments[max(0,i-1):min(i+1,len(segments))])
-    return weights
+def _band_fill(problem, energy, points, prefix):
+    """Exact ordered band fill using one binary per internal boundary."""
+    widths = [high-low for low,high in zip(points,points[1:])]
+    filled = [pulp.LpVariable(f'{prefix}_e{i}',lowBound=0,upBound=width) for i,width in enumerate(widths)]
+    problem += pulp.lpSum(filled) == energy
+    for i in range(len(widths)-1):
+        reached = pulp.LpVariable(f'{prefix}_reached{i}',cat='Binary')
+        problem += filled[i] >= widths[i]*reached
+        problem += filled[i+1] <= widths[i+1]*reached
+    return filled
 
 
 def add_charging_curve(problem, inputs, powers, states, site_state=None, logs=None):
@@ -57,10 +57,12 @@ def add_charging_curve(problem, inputs, powers, states, site_state=None, logs=No
             if not available or bus.max_power_kw <= 0:
                 continue
             prefix = f'curve_b{bi}_t{t}'
-            start = _weights(problem, states[bus.id,t], points, prefix + '_start')
             # The end of charging precedes the interval's trip consumption.
-            end = _weights(problem, states[bus.id,t] + powers[bus.id,t] * dt * bus.efficiency,
-                           points, prefix + '_end')
+            start_energy = states[bus.id,t]
+            end_energy = start_energy + powers[bus.id,t] * dt * bus.efficiency
+            problem += end_energy <= capacity, f'{prefix}_physical_capacity'
+            start_fill = None
+            end_fill = None
             if inputs.charging_sites:
                 limits = [(min(bus.max_power_kw, site.charger_power_kw, site.charger_capacity_kw,
                                site.grid_limit_kw if inputs.scenario == 'baseline' or site.id != inputs.energy_site_id else float('inf')),
@@ -72,14 +74,36 @@ def add_charging_curve(problem, inputs, powers, states, site_state=None, logs=No
             for li, (cap, base, connected) in enumerate(limits):
                 if cap <= 0:
                     continue  # The infrastructure constraints already force zero power.
+                rates = band_rates(inputs, cap, base)
+                if max(rates)-min(rates) <= 1e-10:
+                    # Infrastructure caps can make all curve bands identical.
+                    problem += powers[bus.id,t] <= rates[0] + (bus.max_power_kw*(1-connected) if connected is not None else 0)
+                    continue
+                slopes = [1/(rate*bus.efficiency) for rate in rates]
                 cumulative = [0.0]
-                for low, high, rate in zip(points, points[1:], band_rates(inputs, cap, base)):
-                    cumulative.append(cumulative[-1] + (high-low)/(rate*bus.efficiency))
-                elapsed = pulp.lpSum(value*(after-before) for value,after,before in zip(cumulative,end,start))
+                for low, high, slope in zip(points, points[1:], slopes):
+                    cumulative.append(cumulative[-1] + (high-low)*slope)
+                if t == 0:
+                    initial = bus.initial_soc_kwh
+                    start_time = sum(max(0,min(initial,high)-low)*slope for low,high,slope in zip(points,points[1:],slopes))
+                else:
+                    if start_fill is None:
+                        start_fill = _band_fill(problem,start_energy,points,prefix+'_start')
+                    start_time = pulp.lpSum(fill*slope for fill,slope in zip(start_fill,slopes))
                 allowance = dt if connected is None else dt + cumulative[-1]*(1-connected)
-                problem += elapsed <= allowance, f'{prefix}_time_l{li}'
+                if all(right >= left-1e-12 for left,right in zip(slopes,slopes[1:])):
+                    # For tapering rates, cumulative charging time is convex.
+                    # Its epigraph is exact: no end-state band binaries needed.
+                    for i,slope in enumerate(slopes):
+                        problem += cumulative[i] + slope*(end_energy-points[i]) <= start_time+allowance, f'{prefix}_time_l{li}_band{i}'
+                else:
+                    # Arbitrary increasing/decreasing user curves remain exact.
+                    if end_fill is None:
+                        end_fill = _band_fill(problem,end_energy,points,prefix+'_end')
+                    elapsed = pulp.lpSum(fill*slope for fill,slope in zip(end_fill,slopes))-start_time
+                    problem += elapsed <= allowance, f'{prefix}_time_l{li}'
     if logs is not None:
-        logs.append('[Charging curve] SoC-dependent rates enabled; crossings between bands are integrated within each interval.')
+        logs.append('[Charging curve] Exact compact band model; tapering curves use a convex end-time envelope without end-state band binaries.')
 
 
 def charging_curve_results(inputs):

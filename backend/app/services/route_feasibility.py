@@ -1,5 +1,6 @@
 """Exact isolated route checks after a joint MILP is proven infeasible."""
 import time
+from .optimization_progress import report_progress
 
 from .solver_diagnostics import OptimizationFailure, route_solve_deadline
 
@@ -18,6 +19,7 @@ async def classify_routes(inputs, findings=(), budget_seconds=20):
                              or (inputs.scenario in ('bess', 'pv_bess') and inputs.bess_config is not None
                                  and inputs.bess_config.capacity_kwh > 0 and inputs.bess_config.enable_temperature_capacity_derating))
     for bus in ordered:
+        report_progress('route_diagnostics',f'Checking route {bus.id} in isolation ({len(rows)+1}/{len(ordered)}).',metrics={})
         row = dict(bus_id=bus.id, status='not_determined', diagnostic_candidate=str(bus.id) in candidates,
                    solver_status='Not checked', reason='The individual-check time budget was exhausted.')
         rows[bus.id] = row

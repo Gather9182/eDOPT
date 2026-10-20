@@ -29,6 +29,25 @@ class ChargingCurveTests(unittest.TestCase):
     def solve(self, data, extended=False):
         return run_offline(run_extended_milp_solver(data,[]) if extended else run_milp_solver(data,[]))
 
+    def test_compact_model_avoids_end_band_binaries_for_tapering_curves(self):
+        from app.services import solver
+        class Captured(Exception):
+            pass
+        def capture(problem,*args):
+            counts.append(sum(variable.isBinary() and variable.name.startswith('curve_') for variable in problem.variables()))
+            raise Captured()
+        counts = []
+        for first_slot in (True,False):
+            data = curve_inputs()
+            available = [1,0,0,0] if first_slot else [0,1,0,0]
+            data.buses[0].availability=available
+            data.buses[0].site_availability={'D':available}
+            with patch.object(solver,'solve_soc_policy',capture), self.assertRaises(Captured):
+                self.solve(data)
+        # Fixed initial SoC needs no band decisions; later states need only
+        # the three internal thresholds, rather than eight segment decisions.
+        self.assertEqual(counts,[0,3])
+
     def test_default_is_disabled_and_legacy_power_is_unchanged(self):
         data = curve_inputs(charging_curve={'enabled':False})
         result = self.solve(data)

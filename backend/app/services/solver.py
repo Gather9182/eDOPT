@@ -11,6 +11,7 @@ from .opportunity_charging import add_opportunity_variables, link_visit_charging
 from .soc_policy import solve_soc_policy, soc_policy_results, preferred_maximum, minimum_energy, reference_policy_issues
 from .end_conditions import end_target, add_end_condition, reference_end_issues, end_condition_results
 from .charging_curve import add_charging_curve, max_curve_energy, charging_curve_results
+from .optimization_progress import report_progress
 
 def simulate_baseline_load(inputs: OptimizationInputs, with_issues=False, minimum_soc_deviation=None):
     """
@@ -243,6 +244,7 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
     _validate_bus_inputs(inputs)
     
     prob = pulp.LpProblem("ExtendedDepotOptimization", pulp.LpMinimize)
+    report_progress('building_model',f'Building {inputs.scenario} model for {len(inputs.buses)} {"route" if len(inputs.buses)==1 else "routes"}.',scenario=inputs.scenario,metrics={})
     
     # --- Bus Variables --- (Same as original)
     p_vars = {} # Bus charging power
@@ -449,6 +451,7 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
     # --- Solve ---
     minimum_soc_deviation = solve_soc_policy(prob, inputs, soc_vars, solver_logs)
     status = pulp.LpStatus[prob.status]
+    report_progress('processing_results','Building charging schedules and reference comparison.',metrics={})
 
     # --- Extract Results ---
     schedules = {}
@@ -596,6 +599,7 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
     _validate_bus_inputs(inputs)
 
     prob = pulp.LpProblem("BusDepotChargingOptimization", pulp.LpMinimize)
+    report_progress('building_model',f'Building baseline model for {len(inputs.buses)} {"route" if len(inputs.buses)==1 else "routes"}.',scenario='baseline',metrics={})
     opportunities = add_opportunity_variables(prob, inputs)
     p_vars = {}
     z_vars = {}
@@ -632,6 +636,7 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
     add_charging_curve(prob, inputs, p_vars, soc_vars, site_state, solver_logs)
     minimum_soc_deviation = solve_soc_policy(prob, inputs, soc_vars, solver_logs)
     status = pulp.LpStatus[prob.status]
+    report_progress('processing_results','Building charging schedules and reference comparison.',metrics={})
 
     schedules = {}
     soc_profiles = {}

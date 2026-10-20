@@ -1,4 +1,5 @@
 import axios from 'axios';
+import {optimizationJob} from '../utils/optimizationProgress';
 
 export const API_BASE = import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname}:8000/api`;
 
@@ -31,7 +32,11 @@ export const processExcel = async (file, roundTo30 = false, settings = null) => 
   return response.data;
 };
 
-export const runOptimization = async (inputs) => {
+export const runOptimization = async (inputs, {onProgress} = {}) => {
+  if (onProgress) return optimizationJob(inputs,{
+    start:async body => (await api.post('/optimize/jobs',body,{timeout:15000})).data,
+    get:async id => (await api.get(`/optimize/jobs/${id}`,{timeout:10000})).data,
+  },onProgress);
   const response = await api.post('/optimize', inputs);
   return response.data;
 };

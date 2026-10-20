@@ -1,0 +1,178 @@
+"""Process-local optimization jobs and bounded, read-only CBC telemetry."""
+import asyncio
+import copy
+import math
+import re
+import time
+import uuid
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
+from pathlib import Path
+from threading import RLock
+
+current_progress = ContextVar('optimization_progress', default=None)
+NUMBER = r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?'
+
+
+def parse_cbc_line(line, metrics):
+    def number(value):
+        value = float(value)
+        return value if math.isfinite(value) and abs(value) < 1e40 else None
+    changed = False
+    match = re.search(rf'After (\d+) nodes, (\d+) on tree, ({NUMBER}) best solution, best possible ({NUMBER})',line)
+    if match:
+        metrics.update(nodes=int(match[1]),open_nodes=int(match[2]),incumbent=number(match[3]),best_bound=number(match[4]))
+        changed = True
+    match = re.search(rf'Integer solution of ({NUMBER}) found',line)
+    if match:
+        metrics['incumbent'] = number(match[1])
+        changed = True
+    match = re.search(rf'best objective ({NUMBER})',line)
+    if match:
+        metrics['incumbent'] = number(match[1])
+        changed = True
+    match = re.search(rf'\(({NUMBER}) seconds\)',line)
+    if match:
+        metrics['reported_seconds'] = number(match[1])
+    if changed:
+        incumbent,bound = metrics.get('incumbent'),metrics.get('best_bound')
+        metrics['relative_gap_percent'] = (100*abs(incumbent-bound)/max(abs(incumbent),1e-10)
+                                           if incumbent is not None and bound is not None else None)
+    return changed
+
+
+class Progress:
+    def __init__(self):
+        self.lock = RLock()
+        self.created = time.monotonic()
+        self.phase_started = self.created
+        self.updated = self.created
+        self.data = dict(status='queued',phase='queued',message='Waiting for the optimization worker.',solver_pass=0,metrics={})
+        self.events = deque(maxlen=80)
+        self.event_sequence = 0
+        self.log_path = None
+        self.log_offset = 0
+        self.log_buffer = ''
+        self.last_solver_log = None
+        self.result = None
+        self.error = None
+
+    def update(self, phase, message, **fields):
+        with self.lock:
+            if phase != self.data['phase']:
+                self.phase_started = time.monotonic()
+            self.updated = time.monotonic()
+            self.data.update(phase=phase,message=message,**fields)
+            self.event_sequence += 1
+            self.events.append(dict(sequence=self.event_sequence,message=message))
+
+    def read_log(self):
+        if not self.log_path:
+            return
+        try:
+            with Path(self.log_path).open('rb') as stream:
+                stream.seek(self.log_offset)
+                raw = stream.read(262144)
+                self.log_offset += len(raw)
+            if raw:
+                self.last_solver_log = time.monotonic()
+                lines = (self.log_buffer + raw.decode('utf-8',errors='replace')).split('\n')
+                self.log_buffer = lines.pop()
+                for line in lines:
+                    parse_cbc_line(line,self.data['metrics'])
+                self.data['last_solver_message'] = next((line.strip() for line in reversed(lines) if line.strip()),self.data.get('last_solver_message'))
+        except OSError:
+            pass  # The solver may not have opened the file yet, or has finished.
+
+    def start_solver(self, path, problem, limit):
+        with self.lock:
+            self.log_path,self.log_offset,self.log_buffer = str(path),0,''
+            self.last_solver_log = None
+            self.data.pop('last_solver_message',None)
+            self.data.update(metrics={},solver_pass=self.data['solver_pass']+1,
+                             variables=problem.numVariables(),constraints=problem.numConstraints(),
+                             solver_time_limit_seconds=limit)
+            self.data.pop('solver_status',None)
+            self.solver_started = time.monotonic()
+
+    def finish_solver(self, status):
+        with self.lock:
+            self.read_log()
+            self.log_path = None
+            self.data['solver_status'] = status
+            if status == 'Optimal' and self.data['metrics'].get('incumbent') is not None:
+                self.data['metrics'].update(best_bound=self.data['metrics']['incumbent'],relative_gap_percent=0)
+
+    def snapshot(self):
+        with self.lock:
+            self.read_log()
+            now = time.monotonic()
+            result = copy.deepcopy(self.data)
+            result.update(elapsed_seconds=round(now-self.created,1),phase_seconds=round(now-self.phase_started,1),
+                          solver_seconds=round(now-self.solver_started,1) if self.log_path else None,
+                          seconds_since_solver_log=round(now-self.last_solver_log,1) if self.last_solver_log else None,
+                          events=list(self.events))
+            if self.data['status'] == 'completed':
+                result['result'] = self.result
+            if self.data['status'] == 'failed':
+                result['error'] = self.error
+            return result
+
+
+def report_progress(phase, message, **fields):
+    progress = current_progress.get()
+    if progress:
+        progress.update(phase,message,**fields)
+
+
+def execute(inputs):
+    from .optimization import run_optimization
+    return asyncio.run(run_optimization(inputs))
+
+
+class OptimizationJobs:
+    def __init__(self, runner=execute):
+        self.runner = runner
+        self.lock = RLock()
+        self.jobs = {}
+        self.executor = ThreadPoolExecutor(max_workers=1,thread_name_prefix='edopt-optimizer')
+
+    def submit(self, inputs):
+        with self.lock:
+            now = time.monotonic()
+            finished = [key for key,value in self.jobs.items() if value.data['status'] in ('completed','failed')]
+            for key in finished:
+                if now-self.jobs[key].updated > 1800 or len(self.jobs) >= 8:
+                    del self.jobs[key]
+            if sum(value.data['status'] in ('queued','running') for value in self.jobs.values()) >= 4:
+                raise RuntimeError('The optimization queue is full. Wait for an active run to finish.')
+            key = uuid.uuid4().hex
+            progress = Progress()
+            self.jobs[key] = progress
+            self.executor.submit(self._run,progress,inputs)
+            return key
+
+    def _run(self, progress, inputs):
+        token = current_progress.set(progress)
+        try:
+            progress.update('precheck','Checking input data and energy bounds.',status='running')
+            result = self.runner(inputs)
+            with progress.lock:
+                progress.result = result.model_dump(mode='json') if hasattr(result,'model_dump') else result
+                progress.update('completed','Optimization completed.',status='completed')
+        except Exception as error:
+            with progress.lock:
+                progress.error = dict(detail=str(error))
+                if hasattr(error,'diagnostics'):
+                    progress.error['diagnostics'] = error.diagnostics
+                progress.update('failed','Optimization finished with an error. Review the diagnostic report.',status='failed')
+        finally:
+            current_progress.reset(token)
+
+    def get(self, key):
+        with self.lock:
+            progress = self.jobs.get(key)
+        if progress is None:
+            raise KeyError(key)
+        return progress.snapshot()

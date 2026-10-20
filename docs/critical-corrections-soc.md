@@ -121,6 +121,41 @@ Requests, saved results, diagnostics, result ZIP and XLSX include the curve.
 Enabling it invalidates the current check and requires a new optimization;
 historical results do not change. The extra MILP variables may increase runtime.
 
+The compact formulation uses ordered band fill at the interval start. For
+nonincreasing rates, cumulative charge time is convex: exact end-time supporting
+lines replace all end-band binaries. Four bands need three internal-threshold
+binaries instead of the earlier eight start/end segment binaries per eligible
+interval. The fixed initial state needs none. Non-monotone curves retain an exact
+ordered-fill end representation; constant effective rates need no band binaries.
+No charging limit, time resolution or soft-SoC priority is relaxed.
+
+A synthetic 30-bus/96-period/3-site model-build comparison reduced total variables
+from 76,998 to 45,768 and curve binaries from 22,560 to 8,370. This measures model
+size, not the solving time of a real user configuration. Existing two-stage soft
+SoC optimization and solver budgets are unchanged. The UI shows elapsed time and
+request activity; it no longer presents fixed workflow percentages as measured
+solver progress or estimates a completion time from those percentages.
+
+### Live progress
+
+The UI submits an optimization job and polls its status once per second.
+The job runs in a dedicated worker thread so blocking PuLP/CBC calculations do
+not block the status endpoint. The existing `/api/optimize` endpoint remains
+available for previous clients. Jobs are process-local: one active worker,
+at most four active/queued jobs and bounded retained reports, expiring after
+30 minutes when new jobs are submitted. A backend restart loses these jobs;
+the client reports this explicitly and never silently resubmits a calculation.
+
+Live evidence includes backend phases, scenario, solver pass, model size,
+per-pass solver budget/elapsed time, and CBC-reported incumbent, best bound,
+search nodes and relative gap when present. Metrics reset between solver passes.
+Sentinel objectives do not count as feasible solutions. LP relaxation objectives
+are not reported as integer-feasible solutions. Gap is relative objective
+distance to the bound and is not completion progress. CBC file output may be
+buffered: a lack of new log lines is not proof that computation stopped. Backend
+response freshness and solver-log freshness are shown separately. Failed jobs
+preserve the existing full diagnostics/export payload.
+
 ## Location limits
 
 When `charging_sites` contains configured locations, each location's grid

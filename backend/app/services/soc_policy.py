@@ -8,6 +8,7 @@ removed artificially. Physical bounds remain 0..battery capacity in every mode.
 import pulp
 
 from .solver_diagnostics import OptimizationFailure, solve_with_diagnostics
+from .optimization_progress import report_progress
 
 SOFT_TOLERANCE_KWH_H = 1e-6
 
@@ -71,6 +72,7 @@ def add_soc_policy(problem, inputs, states):
 def solve_soc_policy(problem, inputs, states, logs=None):
     deviations = add_soc_policy(problem, inputs, states)
     if not deviations:
+        report_progress('minimizing_cost','Searching for a feasible schedule and minimizing electricity cost.',objective_label='Electricity cost (EUR)')
         solve_with_diagnostics(problem, inputs, logs)
         return None
     cost_objective = problem.objective.copy()
@@ -78,6 +80,7 @@ def solve_soc_policy(problem, inputs, states, logs=None):
     problem.setObjective(violation_objective)
     if logs is not None:
         logs.append('[SoC] First minimise soft-limit deviations; only then minimise electricity cost.')
+    report_progress('minimizing_soc','Stage 1: minimizing soft SoC deviations before cost.',objective_label='SoC deviation (kWh·h)')
     solve_with_diagnostics(problem, inputs, logs)
     if problem.sol_status != pulp.LpSolutionOptimal:
         raise OptimizationFailure('The minimum soft-SoC deviation was not proven within the solver budget. No cost-only fallback was used.',
@@ -85,6 +88,7 @@ def solve_soc_policy(problem, inputs, states, logs=None):
     minimum = float(pulp.value(violation_objective) or 0)
     problem += violation_objective <= minimum + SOFT_TOLERANCE_KWH_H, 'minimum_soft_soc_deviation'
     problem.setObjective(cost_objective)
+    report_progress('minimizing_cost','Stage 2: minimizing electricity cost with the proven SoC deviation fixed.',objective_label='Electricity cost (EUR)')
     solve_with_diagnostics(problem, inputs, logs)
     return minimum
 
