@@ -45,9 +45,9 @@ semaphore also limits combined active model/solver jobs to the host capacity.
 The daily queue holds at most eight queued/running/cancelling jobs; the normal
 queue retains four. Active jobs are not overwritten or evicted.
 
-Server environment variable `EDOPT_DAILY_WORKERS` defaults to 2 and can be set
-to 1–4 **before starting the backend**. Enabling three/four UI workers requires
-the corresponding server setting. The detected CPU count and available RAM
+The server ceiling defaults to 4; the UI still requests 2 by default.
+`EDOPT_DAILY_WORKERS` can explicitly lower the ceiling to 1–4 **before starting
+the backend**. Selecting four now uses four when host resources permit it. The detected CPU count and available RAM
 can reduce the cap further; unavailable resource detection falls back to one.
 The RAM estimate allows 2 GiB per slot. It is a conservative admission rule,
 not a guarantee that arbitrarily large models fit into memory.
@@ -63,13 +63,23 @@ sharing error from replacing a cancellation with a false solver failure.
 The frontend runs a bounded pool only after the seed passes. Each date has its
 own request capture, telemetry and error report. Checkpoint/manifest writes are
 serialized and keyed by date; completion order does not determine result order.
-UI progress reports completed days and active jobs, plus dated per-job phases.
+UI progress uses one compact overview: completed days, active jobs, remaining
+days, selected/host/run limits and dated phases. Active dates are listed first;
+individual technical solver panels are omitted for Daily Cyclic.
 No completion percentage is inferred from the CBC gap.
 
-Failure stops new work and cancels active siblings. User cancellation reaches
-all active jobs and price-loading requests. Completion is not reported until
-the workers settle. Completed days are retained; failed/cancelled/not-started
-dates are distinct. The analysis ZIP includes the seed, fixed boundary,
+An individual day failure is recorded with its date, exact request, prices and
+diagnostics; healthy siblings and later dates continue. Missing prices on the
+first date allow the next valid date to become the seed. Only explicit user
+cancellation stops scheduling and cancels active siblings. Completion is not
+reported until all workers settle. Completed days are retained; failed,
+cancelled and not-started dates remain distinct. The final summary lists every
+failed date and its cause, and any error keeps the overall result partial.
+
+In coupled serial fallback, a failed day has no proven end state. The next date
+starts a new independent segment using the configured initial conditions,
+explicitly marked in its record and the results. No connection transition
+across a missing date is asserted. Settings and route exclusions are unchanged. The analysis ZIP includes the seed, fixed boundary,
 execution mode, fallback evidence, every day request and result.
 
 Partial results may contain gaps. Detailed chart profiles concatenate only

@@ -97,6 +97,27 @@ class DailyParallelTests(unittest.TestCase):
         with patch('app.services.optimization_progress.os.cpu_count',return_value=1):
             self.assertEqual(daily_worker_capacity(),1)
 
+    def test_default_host_ceiling_allows_four_but_respects_resources_and_explicit_cap(self):
+        with patch.dict('os.environ',{},clear=True),patch('app.services.optimization_progress.available_worker_memory',return_value=16*1024**3),patch('app.services.optimization_progress.os.cpu_count',return_value=8):
+            self.assertEqual(daily_worker_capacity(),4)
+            with patch.dict('os.environ',{'EDOPT_DAILY_WORKERS':'2'}):
+                self.assertEqual(daily_worker_capacity(),2)
+            with patch('app.services.optimization_progress.available_worker_memory',return_value=5*1024**3):
+                self.assertEqual(daily_worker_capacity(),2)
+
+    def test_four_supported_daily_workers_can_actually_run_together(self):
+        entered=[Event() for _ in range(4)];release=Event()
+        def runner(inputs):
+            entered[inputs.index].set();release.wait(4);return {'index':inputs.index}
+        with patch('app.services.optimization_progress.daily_worker_capacity',return_value=4):
+            jobs=OptimizationJobs(runner)
+        try:
+            keys=[jobs.submit(SimpleNamespace(daily_cyclic=True,index=i)) for i in range(4)]
+            self.assertTrue(all(event.wait(2) for event in entered))
+            self.assertTrue(all(jobs.get(key)['status']=='running' for key in keys))
+            self.assertEqual(jobs.capabilities()['daily_workers'],4)
+        finally:release.set();jobs.shutdown()
+
     def test_feasible_incumbent_is_not_reported_as_a_proven_optimum(self):
         import pulp
         class FeasibleCBC(CancellableCBC):

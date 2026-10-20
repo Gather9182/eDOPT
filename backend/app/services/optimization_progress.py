@@ -173,21 +173,24 @@ def execute(inputs):
     return asyncio.run(run_optimization(inputs))
 
 
+def available_worker_memory():
+    if os.name == 'nt':
+        import ctypes
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [('length',ctypes.c_ulong),('load',ctypes.c_ulong)] + [(name,ctypes.c_ulonglong) for name in
+                ('total_physical','available_physical','total_page','available_page','total_virtual','available_virtual','extended')]
+        memory = MemoryStatus();memory.length = ctypes.sizeof(memory)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory)):
+            return 0
+        return memory.available_physical
+    return os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+
+
 def daily_worker_capacity():
-    """Conservative host cap, overridable downwards through EDOPT_DAILY_WORKERS."""
+    """Host ceiling up to four; the UI defaults to requesting two workers."""
     try:
-        requested = max(1,min(4,int(os.environ.get('EDOPT_DAILY_WORKERS','2'))))
-        if os.name == 'nt':
-            import ctypes
-            class MemoryStatus(ctypes.Structure):
-                _fields_ = [('length',ctypes.c_ulong),('load',ctypes.c_ulong)] + [(name,ctypes.c_ulonglong) for name in
-                    ('total_physical','available_physical','total_page','available_page','total_virtual','available_virtual','extended')]
-            memory = MemoryStatus();memory.length = ctypes.sizeof(memory)
-            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory)):
-                return 1
-            available = memory.available_physical
-        else:
-            available = os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+        requested = max(1,min(4,int(os.environ.get('EDOPT_DAILY_WORKERS','4'))))
+        available = available_worker_memory()
         return max(1,min(requested,os.cpu_count() or 1,int(available//(2*1024**3))))
     except (ValueError,OSError,AttributeError):
         return 1

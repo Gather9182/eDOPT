@@ -92,18 +92,21 @@ test('two days use actual daily prices, inherit states and produce verified aggr
   assert.match(files.find(file=>file.name==='tables/daily_prices.csv').data,/310/);
 });
 
-test('failure at day 2 retains day 1 and marks remaining days uncalculated without exclusions',async()=>{
+test('failure at day 2 retains day 1 and continues day 3 as an explicit independent segment',async()=>{
   const input=fixture(),saved=[];
   const run=await runDailyCyclic({...input,dates:['2026-02-02','2026-02-03','2026-02-04'],fetchPrices:async date=>{
     if(date.endsWith('03')) throw new Error('Missing source prices');return priceDay(date);
   },optimize:async request=>solved(request),checkpoint:async record=>saved.push(record)});
   assert.equal(run.status,'partial');
-  assert.deepEqual(run.records.map(row=>row.status),['completed','failed','not_calculated']);
+  assert.deepEqual(run.records.map(row=>row.status),['completed','failed','completed']);
+  assert.equal(run.records[2].continuity_scope,'independent_segment_after_failed_day');
+  assert.equal(run.records[2].reconciliation.proofs[0].previous_final_soc_kwh,null);
+  assert.equal(run.finished,true);
   const result=aggregateDailyRun(run);
-  assert.equal(result.total_days,1);assert.equal(result.requested_days,3);
-  assert.equal(result.daily_results.length,1);
+  assert.equal(result.total_days,2);assert.equal(result.requested_days,3);
+  assert.equal(result.daily_results.length,2);
   assert.deepEqual(input.project.meta.excluded_bus_ids,['EXCLUDED']);
-  assert.equal(saved.length,2);
+  assert.equal(saved.length,3);
 });
 
 test('invalid daily result is not retained as successful and has no silent SoC reset',async()=>{

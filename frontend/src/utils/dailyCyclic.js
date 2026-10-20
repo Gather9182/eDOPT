@@ -6,6 +6,15 @@ import {checkOptimizationCancelled} from './optimizationProgress.js';
 const sum = values => values.reduce((total,value) => total+value,0);
 const close = (a,b,tolerance=.001) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a-b)<=tolerance;
 
+export function dailyRecordError(record) {
+  const detail=record.error?.detail || 'Daily optimization failed.';
+  const error=new Error(typeof detail==='string' ? detail : JSON.stringify(detail));
+  if (record.error?.http_status || record.error?.diagnostics) error.response={status:record.error.http_status,
+    data:{detail,diagnostics:record.error.diagnostics}};
+  if (record.status==='cancelled') error.code='OPTIMIZATION_CANCELLED';
+  return error;
+}
+
 function blocked(site) {
   return (site.no_switch_windows || []).some(window => {
     const minutes=value=>value.split(':').reduce((hours,part)=>hours*60+Number(part),0);
@@ -65,6 +74,7 @@ export function verifyDailyResult(request,result,previous=null,configuredInitial
 async function runSerialDailyCyclic({project,settings,buses,dates,fetchPrices,optimize,checkpoint,notify=()=>{},onDayProgress=()=>{},signal}) {
   const records=[];
   let previous=null,initialConnections,initialEnergies={};
+  let firstError=null,newSegment=false;
   const configured=Object.fromEntries(buildSolverInputs(project,settings,{buses,hours:24,daily:true}).buses.map(bus=>[bus.id,bus.initial_soc_kwh]));
   for (const [index,date] of dates.entries()) {
     let request=null,prices=null,result=null;
@@ -81,30 +91,39 @@ async function runSerialDailyCyclic({project,settings,buses,dates,fetchPrices,op
       notify(`Daily Cyclic: day ${index+1}/${dates.length} (${date}) — optimizing.`);
       result=await optimize(request,{date,day_index:index,chunk_number:index+1,global_start_period:index*n,global_start_minute:index*1440},{signal});
       const reconciliation=verifyDailyResult(request,result,previous,configured);
-      const record={date,day_index:index,status:'completed',request,prices,result,reconciliation};
+      const record={date,day_index:index,status:'completed',request,prices,result,reconciliation,
+        continuity_scope:newSegment ? 'independent_segment_after_failed_day' : index===0 ? 'configured_initial_state' : 'inherited_previous_day',
+        continuity_note:newSegment ? 'New independent segment using configured initial conditions. No connection transition across the failed date is proven.' : null};
       await checkpoint(record);
       records.push(record);
       onDayProgress({date,day_index:index,status:'completed'});
       previous=result;
+      newSegment=false;
       initialEnergies=Object.fromEntries(buses.map(bus=>[bus.id,result.soc_profiles[bus.id].at(-1)]));
       initialConnections=request.charging_sites?.length ? {...result.final_connections} : undefined;
     } catch (error) {
       const cancelled=error.code==='OPTIMIZATION_CANCELLED';
-      const failure={date,day_index:index,status:cancelled ? 'cancelled' : 'failed',request,prices,solver_result:result,error:{detail:error.response?.data?.detail || error.message,diagnostics:error.response?.data?.diagnostics || null}};
+      const failure={date,day_index:index,status:cancelled ? 'cancelled' : 'failed',request,prices,solver_result:result,error:{detail:error.response?.data?.detail || error.message,diagnostics:error.response?.data?.diagnostics || null,http_status:error.response?.status ?? null}};
       records.push(failure);
       onDayProgress({date,day_index:index,status:failure.status});
       await checkpoint(failure);
-      records.push(...dates.slice(index+1).map((later,j)=>({date:later,day_index:index+j+1,status:'not_calculated'})));
-      return {status:records.some(row=>row.status==='completed') ? 'partial' : cancelled ? 'cancelled' : 'failed',records,dates,error};
+      firstError ||= error;
+      if (cancelled) {
+        records.push(...dates.slice(index+1).map((later,j)=>({date:later,day_index:index+j+1,status:'not_calculated'})));
+        return {status:records.some(row=>row.status==='completed') ? 'partial' : 'cancelled',records,dates,error:firstError,finished:false};
+      }
+      notify(`Daily Cyclic: ${date} failed. Continuing with the next date as a new independent segment; no state was invented for the missing day.`);
+      previous=null;initialConnections=undefined;initialEnergies={};newSegment=true;
     }
   }
-  return {status:'completed',records,dates};
+  return {status:firstError ? records.some(row=>row.status==='completed') ? 'partial' : 'failed' : 'completed',records,dates,error:firstError,finished:true};
 }
 
 export async function runDailyCyclic(options) {
-  const {project,settings,buses,dates,fetchPrices,optimize,checkpoint,notify=()=>{},onDayProgress=()=>{},signal,concurrency=2}=options;
+  const {project,settings,buses,dates,fetchPrices,optimize,checkpoint,notify=()=>{},onDayProgress=()=>{},onExecution=()=>{},signal,concurrency=2}=options;
   const workers=Number.isInteger(concurrency) ? Math.max(1,Math.min(4,concurrency)) : 1;
   const serial=async(reason,seedFailure)=>{
+    onExecution({used_workers:1,mode:reason ? 'fallback' : 'serial',fallback_reason:reason || null});
     if (reason) notify(`Daily Cyclic: serial fallback — ${reason}`);
     const run=await runSerialDailyCyclic(options);
     return {...run,execution:{requested_workers:workers,used_workers:1,fallback_reason:reason || null,seed_failure:seedFailure || null}};
@@ -156,19 +175,29 @@ export async function runDailyCyclic(options) {
         return false;
       }
       const failure={date,day_index:index,status:error.code==='OPTIMIZATION_CANCELLED' ? 'cancelled' : 'failed',request,prices,solver_result:result,
-        error:{detail:error.response?.data?.detail || error.message,diagnostics:error.response?.data?.diagnostics || null}};
+        error:{detail:error.response?.data?.detail || error.message,diagnostics:error.response?.data?.diagnostics || null,http_status:error.response?.status ?? null}};
       records[index]=failure;
-      firstError ||= error;stop=true;pool.abort();
+      firstError ||= error;
+      if (error.code==='OPTIMIZATION_CANCELLED') {stop=true;pool.abort();}
+      else notify(`Daily Cyclic: ${date} failed. Other independent day jobs continue.`);
       onDayProgress({date,day_index:index,status:failure.status});
       await save(failure);
       return false;
     }
   }
   try {
-    seedReady=await day(0,true);
-    if (!seedReady && execution.seed_failure) return await serial('The seed did not prove an independent repeatable midnight state.',execution.seed_failure);
+    let seedIndex=0;
+    while (!seedReady && !stop && seedIndex<dates.length) {
+      execution.seed_date=dates[seedIndex];
+      onExecution({used_workers:workers,mode:'seed',seed_date:execution.seed_date});
+      seedReady=await day(seedIndex,true);
+      if (!seedReady && execution.seed_failure) return await serial('The seed did not prove an independent repeatable midnight state.',execution.seed_failure);
+      if (!seedReady) seedIndex++;
+    }
+    next=seedIndex+1;
     if (seedReady) {
       execution.boundary=boundary;
+      onExecution({used_workers:workers,mode:'parallel',seed_date:execution.seed_date});
       notify(`Daily Cyclic: seed verified. Starting at most ${workers} concurrent day jobs.`);
       const outcomes=await Promise.allSettled(Array.from({length:Math.min(workers,dates.length-1)},async()=>{
         while (!stop && next<dates.length) {
@@ -196,7 +225,7 @@ export async function runDailyCyclic(options) {
     }
     const completed=records.filter(record=>record.status==='completed').length;
     const status=completed===dates.length ? 'completed' : completed ? 'partial' : firstError?.code==='OPTIMIZATION_CANCELLED' ? 'cancelled' : 'failed';
-    return {status,records,dates,error:firstError,execution};
+    return {status,records,dates,error:firstError,execution,finished:!stop};
   } finally {
     signal?.removeEventListener('abort',abort);
   }
@@ -211,6 +240,7 @@ export function aggregateDailyRun(run) {
     daily_execution:run.execution,completed_dates:good.map(row=>row.date),completed_day_indices:good.map(row=>row.day_index),
     profile_layout:'Completed daily profiles concatenated in date order. Missing days are not filled. Map profile slots to completed_dates/completed_day_indices; original daily requests/results retain local 0..1440-minute time.',
     day_records:run.records.map(row=>({date:row.date,day_index:row.day_index,status:row.status,reconciliation:row.reconciliation,error:row.error,
+      continuity_scope:row.continuity_scope,continuity_note:row.continuity_note,
       solver_status:row.result?.status,optimality_proven:row.status==='completed' ? row.result.status.startsWith('Optimal') : null,
       market_prices:row.prices?.market_prices,effective_prices:row.request?.electricity_prices,timestamps:row.prices?.timestamps})),
     daily_results:good.map(row=>({date:row.date,day_index:row.day_index,request:row.request,prices:row.prices,result:row.result})),

@@ -1,5 +1,6 @@
 import CustomSelect from '../components/CustomSelect';
 import OptimizationProgress from '../components/OptimizationProgress';
+import DailyRunProgress from '../components/DailyRunProgress';
 import ChargingCurveSettings from '../components/ChargingCurveSettings';
 import {chargingCurveIssues} from '../utils/chargingCurve';
 import {socPolicyInputs, socPolicyIssues, mergeSocPolicies, endConditionPatch, endConditionIssues} from '../utils/socPolicy';
@@ -7,7 +8,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Play, Zap, Terminal, Battery, Clock, CheckCircle, AlertCircle, Loader2, Table as TableIcon, Info, Save, ChevronDown, ChevronUp, Sun, Layers, LayoutDashboard, Activity, Sliders, MapPin, Navigation } from 'lucide-react';
 import { runOptimization as callOptimizeApi, validateInputs, API_BASE, historicalCalendar, historicalDayPrices, optimizationCapabilities } from '../services/api';
 import {buildSolverInputs,effectivePrices,solverTimeLimitIssues} from '../utils/solverInputs';
-import {dailyConfigurationIssues,runDailyCyclic,aggregateDailyRun} from '../utils/dailyCyclic';
+import {dailyConfigurationIssues,runDailyCyclic,aggregateDailyRun,dailyRecordError} from '../utils/dailyCyclic';
 import { generateDefaultPrices } from '../utils/dataMapping';
 import { getItem, setItem } from '../utils/db';
 import { chargingInputs } from '../utils/charging';
@@ -97,6 +98,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
   const pendingJobsRef = useRef(0);
   const [dayLiveProgress,setDayLiveProgress] = useState({});
   const [dayStatuses,setDayStatuses] = useState({});
+  const [dailyExecution,setDailyExecution] = useState(null);
   const logsRef = useRef([]);
   const validationVersionRef = useRef(0);
   const [isValidating, setIsValidating] = useState(false);
@@ -457,6 +459,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     runAbortRef.current = new AbortController();
     setIsCancelling(false);
     setDayLiveProgress({});setDayStatuses({});pendingJobsRef.current=0;
+    setDailyExecution(null);
     setLiveProgress(null);
     optimizationAttemptRef.current = null;
     analysisRunRef.current = {id:crypto.randomUUID(),context:failureContext(),requests:[]};
@@ -488,10 +491,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       }
       catch { addLog('Backend parallel capability could not be confirmed. Using one day worker.'); }
       const concurrency=Math.min(longTermConfig.dailyWorkers || 2,capacity);
+      setDailyExecution({requested:longTermConfig.dailyWorkers || 2,capacity,used_workers:concurrency,mode:concurrency>1 ? 'seed' : 'serial'});
       addLog(`Daily Cyclic: requested ${longTermConfig.dailyWorkers || 2} worker(s), host permits ${capacity}, using at most ${concurrency}.`);
       setDayStatuses(Object.fromEntries(dates.map(date=>[date,'not_calculated'])));
       const run=await runDailyCyclic({project,settings,buses,dates,
         concurrency,signal:runAbortRef.current?.signal,
+        onExecution:execution=>setDailyExecution(previous=>({...previous,...execution})),
         onDayProgress:day=>setDayStatuses(previous=>({...previous,[day.date]:day.status})),
         fetchPrices:async (date,{signal=runAbortRef.current?.signal}={})=>{
           checkOptimizationCancelled(signal);
@@ -522,10 +527,11 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       }
       if (run.status!=='completed') {
         const failed=run.records.find(row=>row.status==='failed') || run.records.find(row=>row.status==='cancelled');
-        optimizationAttemptRef.current = {context:failureContext(),request:failed.request,attempt:{date:failed.date,mode:'daily_cyclic',phase:failed.request ? 'daily_solve_or_check' : 'historical_prices'}};
-        recordOptimizationFailure(run.error);
-        setDailyRunSummary({status:run.status,date:failed.date,completed:run.records.filter(row=>row.status==='completed').length});
-        addLog(`Daily Cyclic stopped at ${failed.date}. Completed days remain saved; no routes were excluded.`);
+        optimizationAttemptRef.current = {context:{...failureContext(),daily_run:{execution:run.execution,finished:run.finished,records:run.records}},request:failed.request,attempt:{date:failed.date,mode:'daily_cyclic',phase:failed.request ? 'daily_solve_or_check' : 'historical_prices'}};
+        recordOptimizationFailure(dailyRecordError(failed));
+        setDailyRunSummary({status:run.status,finished:run.finished,completed:run.records.filter(row=>row.status==='completed').length,
+          failures:run.records.filter(row=>row.status==='failed' || row.status==='cancelled')});
+        addLog(`Daily Cyclic ${run.finished ? 'finished with day errors' : 'was cancelled'}. Completed days remain saved; no routes were excluded.`);
         setStatus('ready');return;
       }
       addLog(`Daily Cyclic completed: ${dates.length} verified daily results saved.`);
@@ -2077,7 +2083,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           </div>
 
           <div className="card shadow-lg p-6 flex flex-col items-center">
-            {dailyRunSummary && <div className="card p-4 mb-4 text-warning" role="status">Daily Cyclic stopped at {dailyRunSummary.date}. {dailyRunSummary.completed} completed days were retained. No routes were excluded and the full period is not marked successful.
+            {dailyRunSummary && <div className="card p-4 mb-4 text-warning" role="status">
+              <strong>{dailyRunSummary.finished ? 'Daily Cyclic finished with day errors' : 'Daily Cyclic cancelled'}</strong>
+              <p>{dailyRunSummary.completed} completed days were retained. {dailyRunSummary.finished ? 'All remaining dates were attempted.' : 'Unstarted dates were not calculated.'} No routes were excluded. This is not a fully successful date range.</p>
+              <div className="daily-run-table-scroll"><table className="data-table"><thead><tr><th>Date</th><th>Status</th><th>Reason</th></tr></thead><tbody>
+                {dailyRunSummary.failures.map(day=><tr key={day.date}><td>{day.date}</td><td>{day.status}</td><td>{typeof day.error?.detail==='string' ? day.error.detail : JSON.stringify(day.error?.detail)}</td></tr>)}
+              </tbody></table></div>
               {dailyRunSummary.completed > 0 && <button className="btn btn-outline mt-3" onClick={()=>onComplete('results')}>View saved partial results and export</button>}
             </div>}
             {validationResult && <ValidationStatusPanel
@@ -2127,7 +2138,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           <div className="progress-bar-container" role="progressbar" aria-label="Optimization in progress">
             <div className="progress-bar progress-bar-indeterminate"></div>
           </div>
-          <p className="text-sm text-muted" style={{maxWidth:520,margin:'12px auto 0'}}>Live backend phases and solver evidence are shown below. The optimization gap is not a completion percentage.</p>
+          <p className="text-sm text-muted" style={{maxWidth:520,margin:'12px auto 0'}}>{simulationMode==='daily_cyclic' ? 'Track completed days and active jobs below.' : 'Live backend phases and solver evidence are shown below. The optimization gap is not a completion percentage.'}</p>
           <button className="btn btn-outline mt-4" disabled={isCancelling} onClick={()=>{
             setIsCancelling(true);
             runAbortRef.current?.abort();
@@ -2139,14 +2150,9 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
               {timeLeftText}
             </div>
           )}
-          <OptimizationProgress state={liveProgress} />
-          {simulationMode==='daily_cyclic' && Object.keys(dayStatuses).length>0 && <div className="optimization-live-panel" style={{maxWidth:760,width:'100%'}}>
-            <strong>{Object.values(dayStatuses).filter(value=>value==='completed').length} of {Object.keys(dayStatuses).length} days completed · {Object.values(dayStatuses).filter(value=>['running','cancelling'].includes(value)).length} day jobs active</strong>
-            <div style={{maxHeight:250,overflow:'auto'}}><table className="data-table"><thead><tr><th>Date</th><th>Status</th></tr></thead><tbody>
-              {Object.entries(dayStatuses).sort(([a],[b])=>a.localeCompare(b)).map(([date,value])=><tr key={date}><td>{date}</td><td>{value}</td></tr>)}
-            </tbody></table></div>
-            {Object.entries(dayLiveProgress).filter(([date])=>['queued','running','cancelling'].includes(dayStatuses[date])).sort(([a],[b])=>a.localeCompare(b)).map(([date,state])=><div key={date}><h3>{date}</h3><OptimizationProgress state={state} /></div>)}
-          </div>}
+          {simulationMode==='daily_cyclic'
+            ? <DailyRunProgress statuses={dayStatuses} telemetry={dayLiveProgress} execution={dailyExecution} />
+            : <OptimizationProgress state={liveProgress} />}
         </div>
       )}
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {runDailyCyclic,aggregateDailyRun} from '../src/utils/dailyCyclic.js';
+import {runDailyCyclic,aggregateDailyRun,dailyRecordError} from '../src/utils/dailyCyclic.js';
 import {dailyPhysicalKey,calendarDayIndex,completedSlotForCalendarDay} from '../src/utils/dailyBoundary.js';
 import {cancellationError} from '../src/utils/optimizationProgress.js';
 
@@ -19,6 +19,13 @@ function solved(request){const p=5/12;return {status:'Optimal (Baseline Optimize
  total_cost_eur:5*request.electricity_prices[1]/1000,total_energy_mwh:.005,connection_schedules:{B:['D','D']},final_connections:{B:'D'},baseline_feasible:false};}
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const waitAbort=signal=>new Promise((_,reject)=>{if(signal.aborted)return reject(cancellationError());signal.addEventListener('abort',()=>reject(cancellationError()),{once:true});});
+
+test('selecting four starts four bounded day jobs after the seed and reports both execution phases',async()=>{
+ const options=fixture(),phases=[];let active=0,maximum=0;
+ const run=await runDailyCyclic({...options,dates,concurrency:4,onExecution:execution=>phases.push(execution.mode),
+ optimize:async(request,attempt)=>{if(attempt.day_index){active++;maximum=Math.max(maximum,active);await delay(10);active--;}return solved(request);}});
+ assert.equal(maximum,4);assert.equal(run.status,'completed');assert.deepEqual(phases,['seed','parallel']);
+});
 
 test('seed then two bounded workers complete out of order with ordered evidence and serialized checkpoints',async()=>{
  const options=fixture(),before=JSON.stringify(options.project),completed=[],requests=[];let active=0,max=0,saving=0,maxSaving=0;
@@ -50,19 +57,56 @@ test('an infeasible seed uses a normal serial retry without changing user config
  assert.equal(run.execution.seed_failure.detail,'Seed infeasible');
 });
 
-test('one failed day cancels its active sibling and retains an earlier out-of-order complete day',async()=>{
+test('one failed day does not cancel siblings or prevent any later date from being optimized',async()=>{
  const options=fixture();let calls=0;
  const run=await runDailyCyclic({...options,dates,optimize:async (request,attempt,{signal})=>{
    calls++;if(attempt.day_index===1){await delay(20);throw new Error('Solver time budget exhausted');}
-   if(attempt.day_index===3)return waitAbort(signal);
+   if(attempt.day_index===3){await delay(30);assert.equal(signal.aborted,false);}
    return solved(request);
  }});
- assert.equal(run.status,'partial');assert.equal(calls,4);
- assert.deepEqual(run.records.map(row=>row.status),['completed','failed','completed','cancelled','not_calculated']);
- const result=aggregateDailyRun(run);assert.deepEqual(result.completed_day_indices,[0,2]);
- assert.deepEqual(result.completed_dates,[dates[0],dates[2]]);
+ assert.equal(run.status,'partial');assert.equal(calls,5);assert.equal(run.finished,true);
+ assert.deepEqual(run.records.map(row=>row.status),['completed','failed','completed','completed','completed']);
+ const result=aggregateDailyRun(run);assert.deepEqual(result.completed_day_indices,[0,2,3,4]);
+ assert.deepEqual(result.completed_dates,[dates[0],dates[2],dates[3],dates[4]]);
  assert.equal(calendarDayIndex(result,1),2);assert.equal(completedSlotForCalendarDay(result,1),-1);
  assert.equal(completedSlotForCalendarDay(result,2),1);
+});
+
+test('missing prices on the first date are recorded and the next valid date becomes the seed',async()=>{
+ const options=fixture(),fetchPrices=options.fetchPrices;
+ const run=await runDailyCyclic({...options,fetchPrices:async date=>{if(date===dates[0])throw new Error('Missing historical prices');return fetchPrices(date);},
+   optimize:async request=>solved(request)});
+ assert.equal(run.finished,true);assert.equal(run.status,'partial');
+ assert.deepEqual(run.records.map(row=>row.status),['failed','completed','completed']);
+ assert.equal(run.execution.seed_date,dates[1]);assert.match(run.records[0].error.detail,/Missing historical prices/);
+});
+
+test('multiple independent day errors retain their individual causes and still attempt every later date',async()=>{
+ const options=fixture(),before=JSON.stringify(options.project),attempted=[];
+ const run=await runDailyCyclic({...options,dates,optimize:async(request,attempt)=>{
+   attempted.push(attempt.date);if([1,3].includes(attempt.day_index))throw new Error(`Timeout on ${attempt.date}`);return solved(request);
+ }});
+ assert.deepEqual([...attempted].sort(),dates);assert.equal(run.finished,true);
+ assert.deepEqual(run.records.map(row=>row.status),['completed','failed','completed','failed','completed']);
+ const aggregate=aggregateDailyRun(run);
+ assert.deepEqual(aggregate.failed_attempts.map(row=>row.error.detail),[`Timeout on ${dates[1]}`,`Timeout on ${dates[3]}`]);
+ assert.deepEqual(aggregate.completed_dates,[dates[0],dates[2],dates[4]]);
+ assert.equal(JSON.stringify(options.project),before);
+});
+
+test('a dated error report uses that day’s diagnostics even when failures finish out of order',async()=>{
+ const options=fixture();
+ const run=await runDailyCyclic({...options,optimize:async(request,attempt)=>{
+   if(attempt.day_index){
+     if(attempt.day_index===1)await delay(10);
+     const error=new Error(attempt.date);error.response={status:500,data:{detail:attempt.date,diagnostics:{date:attempt.date}}};throw error;
+   }
+   return solved(request);
+ }});
+ const firstByDate=run.records.find(row=>row.status==='failed');
+ const error=dailyRecordError(firstByDate);
+ assert.equal(error.message,dates[1]);assert.equal(error.response.data.diagnostics.date,dates[1]);
+ assert.equal(run.finished,true);
 });
 
 test('cancel stops both active day jobs and starts no later day',async()=>{
