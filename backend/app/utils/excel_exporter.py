@@ -103,7 +103,8 @@ class ExcelExporter:
                                 'Connector power (kW)': site.get('charger_power_kw'), 'Site charging limit (kW)': site.get('charger_capacity_kw'),
                                 'Site grid limit (kW)': site.get('grid_limit_kw'),
                                 'No switching': '; '.join(f"{w['start']} to {w['end']}" for w in site.get('no_switch_windows', [])),
-                                'Connect on arrival': site.get('allow_connect_on_arrival', True),
+                                'Connect on arrival': False if site.get('lock_charging_mode') == 'automatic_balanced' else site.get('allow_connect_on_arrival', True),
+                                'Locked charging mode': site.get('lock_charging_mode','Not recorded'),
                                 'PV/BESS location': site['id'] == inputs.get('energy_site_id')})
         if config_rows:
             pd.DataFrame(config_rows).to_excel(writer, sheet_name='Location Settings', index=False, startrow=2)

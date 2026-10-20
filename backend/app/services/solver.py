@@ -12,6 +12,7 @@ from .soc_policy import solve_soc_policy, soc_policy_results, preferred_maximum,
 from .end_conditions import end_target, add_end_condition, reference_end_issues, end_condition_results
 from .charging_curve import add_charging_curve, max_curve_energy, charging_curve_results
 from .optimization_progress import report_progress
+from .automatic_charging import add_automatic_charging
 
 def simulate_baseline_load(inputs: OptimizationInputs, with_issues=False, minimum_soc_deviation=None):
     """
@@ -447,7 +448,9 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
     site_state = add_site_constraints(prob, inputs, p_vars, grid_import, (pv_used, b_charge, b_discharge), opportunities)
     if site_state:
         link_visit_charging(prob, inputs, opportunities, site_state[0], site_state[1], soc_vars)
-    add_charging_curve(prob, inputs, p_vars, soc_vars, site_state, solver_logs)
+    curve_elapsed = add_charging_curve(prob, inputs, p_vars, soc_vars, site_state, solver_logs)
+    add_automatic_charging(prob, inputs, soc_vars, site_state, opportunities, curve_elapsed,
+                           (pv_gen_profile,pv_curtailed,b_charge,b_discharge,b_soc,bess_cfg),solver_logs)
     # --- Solve ---
     minimum_soc_deviation = solve_soc_policy(prob, inputs, soc_vars, solver_logs)
     status = pulp.LpStatus[prob.status]
@@ -633,7 +636,8 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
     site_state = add_site_constraints(prob, inputs, p_vars, opportunities=opportunities)
     if site_state:
         link_visit_charging(prob, inputs, opportunities, site_state[0], site_state[1], soc_vars)
-    add_charging_curve(prob, inputs, p_vars, soc_vars, site_state, solver_logs)
+    curve_elapsed = add_charging_curve(prob, inputs, p_vars, soc_vars, site_state, solver_logs)
+    add_automatic_charging(prob, inputs, soc_vars, site_state, opportunities, curve_elapsed,logs=solver_logs)
     minimum_soc_deviation = solve_soc_policy(prob, inputs, soc_vars, solver_logs)
     status = pulp.LpStatus[prob.status]
     report_progress('processing_results','Building charging schedules and reference comparison.',metrics={})

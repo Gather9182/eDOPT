@@ -45,8 +45,10 @@ def _band_fill(problem, energy, points, prefix):
 
 
 def add_charging_curve(problem, inputs, powers, states, site_state=None, logs=None):
+    from .charging_sites import slot_is_blocked
+    locked_elapsed = {}
     if not inputs.charging_curve.enabled:
-        return
+        return locked_elapsed
     dt = inputs.time_step_minutes / 60
     for bi, bus in enumerate(inputs.buses):
         capacity = bus.max_battery_capacity_kwh
@@ -66,18 +68,21 @@ def add_charging_curve(problem, inputs, powers, states, site_state=None, logs=No
             if inputs.charging_sites:
                 limits = [(min(bus.max_power_kw, site.charger_power_kw, site.charger_capacity_kw,
                                site.grid_limit_kw if inputs.scenario == 'baseline' or site.id != inputs.energy_site_id else float('inf')),
-                           site.charger_power_kw, site_state[0][bus.id,site.id,t]) for site in inputs.charging_sites
+                           site.charger_power_kw, site_state[0][bus.id,site.id,t], site) for site in inputs.charging_sites
                           if site_potential.get(site.id, [0]*len(potential))[t]]
             else:
                 limits = [(min(bus.max_power_kw, inputs.charger_capacity_kw,
-                               inputs.grid_limit_kw if inputs.scenario == 'baseline' else float('inf')), bus.max_power_kw, None)]
-            for li, (cap, base, connected) in enumerate(limits):
+                               inputs.grid_limit_kw if inputs.scenario == 'baseline' else float('inf')), bus.max_power_kw, None, None)]
+            for li, (cap, base, connected, site) in enumerate(limits):
                 if cap <= 0:
                     continue  # The infrastructure constraints already force zero power.
                 rates = band_rates(inputs, cap, base)
+                automatic = site is not None and site.lock_charging_mode == 'automatic_balanced' and slot_is_blocked(site,inputs.horizon_start_minute+t*inputs.time_step_minutes,inputs.time_step_minutes)
                 if max(rates)-min(rates) <= 1e-10:
                     # Infrastructure caps can make all curve bands identical.
                     problem += powers[bus.id,t] <= rates[0] + (bus.max_power_kw*(1-connected) if connected is not None else 0)
+                    if automatic:
+                        locked_elapsed[bus.id,site.id,t] = powers[bus.id,t]*dt/rates[0]
                     continue
                 slopes = [1/(rate*bus.efficiency) for rate in rates]
                 cumulative = [0.0]
@@ -96,14 +101,21 @@ def add_charging_curve(problem, inputs, powers, states, site_state=None, logs=No
                     # Its epigraph is exact: no end-state band binaries needed.
                     for i,slope in enumerate(slopes):
                         problem += cumulative[i] + slope*(end_energy-points[i]) <= start_time+allowance, f'{prefix}_time_l{li}_band{i}'
+                    if automatic:
+                        if end_fill is None:
+                            end_fill = _band_fill(problem,end_energy,points,prefix+'_end')
+                        locked_elapsed[bus.id,site.id,t] = pulp.lpSum(fill*slope for fill,slope in zip(end_fill,slopes))-start_time
                 else:
                     # Arbitrary increasing/decreasing user curves remain exact.
                     if end_fill is None:
                         end_fill = _band_fill(problem,end_energy,points,prefix+'_end')
                     elapsed = pulp.lpSum(fill*slope for fill,slope in zip(end_fill,slopes))-start_time
                     problem += elapsed <= allowance, f'{prefix}_time_l{li}'
+                    if automatic:
+                        locked_elapsed[bus.id,site.id,t] = elapsed
     if logs is not None:
-        logs.append('[Charging curve] Exact compact band model; tapering curves use a convex end-time envelope without end-state band binaries.')
+        logs.append('[Charging curve] Exact compact band model; automatic locked charging additionally proves saturation of the applicable curve.')
+    return locked_elapsed
 
 
 def charging_curve_results(inputs):

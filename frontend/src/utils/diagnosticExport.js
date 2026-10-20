@@ -98,10 +98,10 @@ export async function diagnosticFiles(diagnostic, logs, getItem, exportedAt = ne
     ...issues.map((issue, i) => [i+1, issue.type, validationCategory(issue), issue.code, issue.bus_id, issue.message, JSON.stringify(issue)])];
   const sites = request?.charging_sites || project.charging?.sites || [];
   const mappings = diagnostic.runtime_settings.resolved_opportunity?.mappings || project.charging?.opportunity?.mappings || [];
-  const siteRows = [['ID','Name','Nodes_JSON','Connectors','kW_per_connector','Charging_capacity_kW','Grid_capacity_kW','Switching_restrictions_JSON','Connect_on_arrival','PV_BESS_location'],
+  const siteRows = [['ID','Name','Nodes_JSON','Connectors','kW_per_connector','Charging_capacity_kW','Grid_capacity_kW','Switching_restrictions_JSON','Connect_on_arrival','PV_BESS_location','Locked_charging_mode'],
     ...sites.map(site => [site.id,site.name,JSON.stringify(site.nodes),site.num_chargers,site.charger_power_kw,
       site.charger_capacity_kw,site.grid_limit_kw,JSON.stringify(site.no_switch_windows),site.allow_connect_on_arrival,
-      (request?.energy_site_id || project.charging?.energy_site_id) === site.id])];
+      (request?.energy_site_id || project.charging?.energy_site_id) === site.id,site.lock_charging_mode || 'Not recorded'])];
   const mappingRows = [['ID','Enabled','Stop_code','Stop_name','Nodes_JSON','Destination','Destination_ID','Outbound_min','Return_min','Outbound_km','Return_km','Full_mapping_JSON'],
     ...mappings.map(row => [row.id,row.enabled,row.source_node_code,row.stop_name,JSON.stringify(row.nodes),row.target_name,row.site_id,
       row.outbound_minutes,row.return_minutes,row.outbound_km,row.return_km,JSON.stringify(row)])];
@@ -140,7 +140,7 @@ export async function diagnosticFiles(diagnostic, logs, getItem, exportedAt = ne
     `Global settings: ${json(diagnostic.runtime_settings.localSettings)}`,
     `Initial SoC fraction: ${project.meta?.initial_soc_fraction}; Reserve fraction: ${project.meta?.min_final_soc_fraction}`,
     `Charging locations: ${sites.length}; Additional charging connections: ${mappings.length}`,
-    ...sites.map(site => `${site.name || site.id} (${site.id}): ${site.num_chargers} connectors at ${site.charger_power_kw} kW; Charging capacity ${site.charger_capacity_kw} kW; Grid ${site.grid_limit_kw} kW; Nodes ${JSON.stringify(site.nodes)}; Switching restrictions ${JSON.stringify(site.no_switch_windows)}`),
+    ...sites.map(site => `${site.name || site.id} (${site.id}): ${site.num_chargers} connectors at ${site.charger_power_kw} kW; Charging capacity ${site.charger_capacity_kw} kW; Grid ${site.grid_limit_kw} kW; Nodes ${JSON.stringify(site.nodes)}; Switching restrictions ${JSON.stringify(site.no_switch_windows)}; Locked charging mode: ${site.lock_charging_mode || 'Not recorded'}`),
     `Vehicle type settings: ${json(project.meta?.vehicle_types_config || {})}`,
     '', 'FILES AND ANALYSIS',
     'manifest.json: Timestamps, scope, units, exclusions and missing information.',

@@ -25,6 +25,7 @@ class ChargingSite(BaseModel):
     grid_limit_kw: float = Field(150, ge=0)
     no_switch_windows: List[SwitchingWindow] = Field(default_factory=list)
     allow_connect_on_arrival: bool = True
+    lock_charging_mode: Literal['automatic_balanced', 'optimized'] = 'automatic_balanced'
 
 class OpportunityVisit(BaseModel):
     id: str

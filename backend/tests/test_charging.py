@@ -24,8 +24,10 @@ def run_offline(coroutine):
 
 
 def site(site_id='D', **kwargs):
-    return dict(id=site_id, nodes=[site_id+'_A', site_id+'_E'], num_chargers=1,
-                charger_power_kw=40, charger_capacity_kw=40, grid_limit_kw=40, **kwargs)
+    result = dict(id=site_id, nodes=[site_id+'_A', site_id+'_E'], num_chargers=1,
+                  charger_power_kw=40, charger_capacity_kw=40, grid_limit_kw=40, lock_charging_mode='optimized')
+    result.update(kwargs)
+    return result
 
 
 def bus(bus_id, site_id='D', n=4, **kwargs):

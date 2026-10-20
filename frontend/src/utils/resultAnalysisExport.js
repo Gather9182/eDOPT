@@ -150,7 +150,7 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
   const sites = inputs?.charging_sites || [];
   const siteIds = [...new Set([...sites.map(site => site.id),...Object.keys(results.site_load_profiles || {}),
     ...Object.keys(results.site_grid_import_profiles || {}),...Object.keys(results.site_occupied_connectors || {})])];
-  files.push({name:'tables/charging_sites.csv',data:objectCsv(sites,['id','name','nodes','num_chargers','charger_power_kw','charger_capacity_kw','grid_limit_kw','no_switch_windows'])},
+  files.push({name:'tables/charging_sites.csv',data:objectCsv(sites,['id','name','nodes','num_chargers','charger_power_kw','charger_capacity_kw','grid_limit_kw','no_switch_windows','lock_charging_mode','allow_connect_on_arrival'])},
     {name:'tables/site_profiles.csv',data:csv((function* () {
       yield ['Charging_site','Period_zero_based','Minutes_from_start','Load_kW','Grid_import_kW','Occupied_connectors'];
       for (const id of siteIds) {

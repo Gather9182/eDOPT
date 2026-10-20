@@ -156,7 +156,39 @@ buffered: a lack of new log lines is not proof that computation stopped. Backend
 response freshness and solver-log freshness are shown separately. Failed jobs
 preserve the existing full diagnostics/export payload.
 
-## Location limits
+## Automatic charging during unattended locks
+
+New/missing location mode defaults to `automatic_balanced`. In an unattended
+lock, new connections (including arrival exceptions) and switching are prohibited.
+Scheduled departures still release connectors. The initial unknown parked fleet
+can be initialized as already connected; cyclic boundary constraints and explicit
+initial connections remain enforced. This is not a permission to connect a bus
+arriving inside the first locked slot.
+
+Already connected, chargeable buses use capped equal shares of maximum available
+site power in each grid interval. A bus constrained by its SoC target, bus power
+or integrated charging curve releases its unused share to the others. Hard
+complementarity constraints enforce this independently of electricity prices;
+there is no extra chronological series of optimization solves. Equality is in
+interval-average kW, consistent with existing grid/curve discretization.
+
+The stopping target is the operating maximum SoC, or physical 100% if disabled.
+A soft maximum may be relaxed within the existing minimum-deviation-first policy
+when required for feasibility. Cyclic equality and final reserves remain hard
+requirements and are not silently relaxed to accommodate automatic charging.
+At a PV/BESS site, available PV and storage supply buses before storage-charging
+arbitrage can defer unattended bus charging. Site, connector, bus, grid and
+storage constraints remain enforced. Exact curve saturation adds variables only
+in automatic locked periods; the earlier compact formulation applies elsewhere.
+
+The selectable `optimized` mode retains the previous power optimization and
+optional arrival exception. UI and frozen solver requests explicitly record the
+mode; ZIP and XLSX location settings include it. Old saved results remain
+historical. The grid-only arrival reference uses the same capped equal shares
+and strict connection rule for automatic locks. A previous request missing this
+new field must set `optimized` explicitly to replay the older switching-only rule.
+
+## Independent location capacities
 
 When `charging_sites` contains configured locations, each location's grid
 connection, aggregate charger capacity, connector power and connector count
