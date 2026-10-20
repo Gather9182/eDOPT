@@ -1614,3 +1614,14 @@ input[type="range"]::-webkit-slider-thumb:hover {
 .daily-run-status.is-failed { background: var(--badge-error-bg); color: var(--badge-error-text); }
 .daily-run-status.is-cancelling { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
 @media (max-width: 520px) { .daily-run-progress { padding: 14px; } .daily-run-metrics { gap: 6px; } .daily-run-metrics > div { padding: 9px; } .daily-run-metrics strong { font-size: 18px; } }
+
+
+.excluded-daily-dates { display: flex; flex-wrap: wrap; gap: 6px; max-height: 140px; overflow: auto; margin-top: 12px; }
+.excluded-daily-date { display: inline-flex; padding: 5px 8px; border-radius: 5px; font-size: 11px; background: var(--badge-warning-bg); color: var(--badge-warning-text); }
+.excluded-daily-date.is-failed { background: var(--badge-error-bg); color: var(--badge-error-text); }
+.excluded-daily-row { background: var(--badge-warning-bg); }
+.excluded-daily-row.is-failed { background: var(--badge-error-bg); }
+.calendar-day-excluded:disabled { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 48px; width: 100%; border: 1px solid transparent; border-radius: 8px; background: var(--badge-warning-bg); color: var(--badge-warning-text); opacity: 1; cursor: not-allowed; }
+.calendar-day-excluded.is-failed:disabled { background: var(--badge-error-bg); color: var(--badge-error-text); border-color: var(--badge-error-text); }
+.calendar-day-excluded span { font-size: 14px; font-weight: 700; }
+.calendar-day-excluded small { font-size: 8px; font-weight: 600; margin-top: 2px; }

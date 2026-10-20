@@ -4,6 +4,7 @@ import SocPolicyResults from '../components/SocPolicyResults';
 import EndConditionResults from '../components/EndConditionResults';
 import DailyCyclicSummary from '../components/DailyCyclicSummary';
 import {calendarDayIndex,completedSlotForCalendarDay} from '../utils/dailyBoundary';
+import {dailyStatusLabel,contiguousDayWindow} from '../utils/dailyProgress';
 import ChargingCurveResults from '../components/ChargingCurveResults';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area,
@@ -57,6 +58,7 @@ const SimulationDatePicker = ({ results, selectedDay, setSelectedDay, setAuditAc
   const dropdownContent = useMemo(() => {
     const startDateStr = results.run_metadata?.inputs?.start_date || results.run_metadata?.settings?.longTermConfig?.startDate || '2026-01-01';
     const baseDate = new Date(startDateStr);
+    const dayRecords=new Map((results.day_records || []).map(day=>[day.day_index,day]));
     
     // Show Current Selection's Month or First Month
     const focalDate = selectedDay !== null 
@@ -98,10 +100,19 @@ const SimulationDatePicker = ({ results, selectedDay, setSelectedDay, setAuditAc
             {Array.from({ length: daysInMonth }).map((_, i) => {
               const dNum = i + 1;
               const dayIndex = completedSlotForCalendarDay(results,firstDayIndex + i);
+              const record=dayRecords.get(firstDayIndex+i);
               
               const exists = dailyOverviewData[dayIndex];
               const isActive = selectedDay === dayIndex;
               
+              if (!exists && record && record.status!=='completed') {
+                const reason=typeof record.error?.detail==='string' ? record.error.detail : 'No usable result is available.';
+                return <button type="button" key={i} disabled className={`calendar-day-excluded is-${record.status}`}
+                  title={`${record.date}: ${dailyStatusLabel(record.status)}. Excluded from calculations. ${reason}`}
+                  aria-label={`${record.date}: ${dailyStatusLabel(record.status)}, excluded from calculations. ${reason}`}>
+                  <span>{dNum}</span><small>{dailyStatusLabel(record.status)}</small>
+                </button>;
+              }
               if (!exists) return <div key={i} style={{ height: '44px', display: 'flex', alignItems: 'center', justifySelf: 'center', fontSize: '13px', color: '#f3f4f6' }}>{dNum}</div>;
 
               let bgStyle = 'transparent';
@@ -1792,7 +1803,7 @@ const Results = () => {
       const dailyCo2Saved = ((sumBaseline - sumGrid) * dt * co2Factor) / 1000000;
       runningCo2Savings += dailyCo2Saved;
       
-      const currentDate = new Date(startDate.getTime() + i * 24 * 60 * 60 * 1000);
+      const currentDate = new Date(startDate.getTime() + calendarDayIndex(results,i) * 24 * 60 * 60 * 1000);
       const dateLabel = currentDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
       const monthLabel = currentDate.toLocaleDateString('en-US', { month: 'long' });
       const monthVal = currentDate.getMonth();
@@ -1803,6 +1814,7 @@ const Results = () => {
 
       overviewData.push({
         day: i + 1,
+        calendarDay:calendarDayIndex(results,i),
         dayLabel: `Day ${i + 1}`,
         dateLabel: dateLabel,
         dateIso: dateIso,
@@ -1836,8 +1848,7 @@ const Results = () => {
       const half = Math.floor(windowSize / 2);
       let sum = 0;
       let count = 0;
-      const start = Math.max(0, idx - half);
-      const end = Math.min(data.length - 1, idx + half);
+      const {start,end}=contiguousDayWindow(data,idx,half,half);
       for (let j = start; j <= end; j++) {
         sum += data[j][key];
         count++;
@@ -1849,7 +1860,7 @@ const Results = () => {
     const getTrailingSMA = (data, key, idx, windowSize) => {
       let sum = 0;
       let count = 0;
-      const start = Math.max(0, idx - windowSize + 1);
+      const {start}=contiguousDayWindow(data,idx,windowSize-1);
       for (let j = start; j <= idx; j++) {
         sum += data[j][key];
         count++;

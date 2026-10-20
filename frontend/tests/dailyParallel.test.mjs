@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {runDailyCyclic,aggregateDailyRun,dailyRecordError} from '../src/utils/dailyCyclic.js';
+import {runDailyCyclic,aggregateDailyRun,dailyRecordError,dailyResultsReady} from '../src/utils/dailyCyclic.js';
 import {dailyPhysicalKey,calendarDayIndex,completedSlotForCalendarDay} from '../src/utils/dailyBoundary.js';
 import {cancellationError} from '../src/utils/optimizationProgress.js';
 
@@ -91,7 +91,21 @@ test('multiple independent day errors retain their individual causes and still a
  const aggregate=aggregateDailyRun(run);
  assert.deepEqual(aggregate.failed_attempts.map(row=>row.error.detail),[`Timeout on ${dates[1]}`,`Timeout on ${dates[3]}`]);
  assert.deepEqual(aggregate.completed_dates,[dates[0],dates[2],dates[4]]);
+ assert.equal(dailyResultsReady(run),true);
+ // Even retained numerical evidence from a failed solve must never enter KPIs.
+ run.records[1].result={total_cost_eur:99999,total_energy_mwh:999,peak_load_kw:99999};
+ run.records[1].reconciliation={cost_eur:99999,charger_energy_mwh:999};
+ const filtered=aggregateDailyRun(run);
+ assert.equal(filtered.total_cost_eur,6);assert.equal(filtered.total_energy_mwh,.015);
+ assert.ok(filtered.peak_load_kw<1);assert.equal(filtered.daily_results.length,3);
  assert.equal(JSON.stringify(options.project),before);
+});
+
+test('only finished runs with valid days automatically open Results, including partial runs',()=>{
+ assert.equal(dailyResultsReady({status:'partial',finished:true,records:[{status:'completed'},{status:'failed'}]}),true);
+ assert.equal(dailyResultsReady({status:'completed',records:[{status:'completed'}]}),true);
+ assert.equal(dailyResultsReady({status:'failed',finished:true,records:[{status:'failed'}]}),false);
+ assert.equal(dailyResultsReady({status:'partial',finished:false,records:[{status:'completed'},{status:'cancelled'}]}),false);
 });
 
 test('a dated error report uses that day’s diagnostics even when failures finish out of order',async()=>{

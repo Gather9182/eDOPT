@@ -15,6 +15,8 @@ export function dailyRecordError(record) {
   return error;
 }
 
+export const dailyResultsReady = run => Boolean(run.finished || run.status==='completed') && run.records.some(record=>record.status==='completed');
+
 function blocked(site) {
   return (site.no_switch_windows || []).some(window => {
     const minutes=value=>value.split(':').reduce((hours,part)=>hours*60+Number(part),0);

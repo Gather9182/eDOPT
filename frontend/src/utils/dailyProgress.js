@@ -10,3 +10,14 @@ export function dailyProgressSummary(statuses) {
 }
 
 export const dailyPhaseLabel = phase => phases[phase] || 'Computing schedule';
+
+export const excludedDailyDates = results => (results.day_records || []).filter(day=>day.status!=='completed');
+export const dailyStatusLabel = status => labels[status] || status;
+
+export function contiguousDayWindow(data,index,before,after=0) {
+  let start=index,end=index;
+  const day=position=>data[position].calendarDay ?? position;
+  while (start>Math.max(0,index-before) && day(start)===day(start-1)+1) start--;
+  while (end<Math.min(data.length-1,index+after) && day(end+1)===day(end)+1) end++;
+  return {start,end};
+}

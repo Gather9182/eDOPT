@@ -8,7 +8,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Play, Zap, Terminal, Battery, Clock, CheckCircle, AlertCircle, Loader2, Table as TableIcon, Info, Save, ChevronDown, ChevronUp, Sun, Layers, LayoutDashboard, Activity, Sliders, MapPin, Navigation } from 'lucide-react';
 import { runOptimization as callOptimizeApi, validateInputs, API_BASE, historicalCalendar, historicalDayPrices, optimizationCapabilities } from '../services/api';
 import {buildSolverInputs,effectivePrices,solverTimeLimitIssues} from '../utils/solverInputs';
-import {dailyConfigurationIssues,runDailyCyclic,aggregateDailyRun,dailyRecordError} from '../utils/dailyCyclic';
+import {dailyConfigurationIssues,runDailyCyclic,aggregateDailyRun,dailyRecordError,dailyResultsReady} from '../utils/dailyCyclic';
 import { generateDefaultPrices } from '../utils/dataMapping';
 import { getItem, setItem } from '../utils/db';
 import { chargingInputs } from '../utils/charging';
@@ -522,8 +522,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         payload.run_metadata={...fleetRunMetadata(project),...runAuditMetadata(analysisRunRef.current.context,validationState?.diagnostic,logsRef.current,analysisRunRef.current.requests),
           run_id:runId,timestamp:new Date().toISOString(),scenario:'baseline',is_long_term:true,long_term_mode:'daily_cyclic',
           settings:{...settings,longTermConfig:{...longTermConfig,chunkSizeHours:24}},
-          inputs:{...run.records[0].request,start_date:longTermConfig.startDate,end_date:longTermConfig.endDate},daily_checkpoints:keys};
+          inputs:{...run.records.find(record=>record.status==='completed').request,start_date:longTermConfig.startDate,end_date:longTermConfig.endDate},daily_checkpoints:keys};
         await setItem('optimization_results',payload);
+      }
+      if (payload && dailyResultsReady(run)) {
+        addLog(run.status==='completed' ? `Daily Cyclic completed: ${dates.length} verified daily results saved.` : 'Daily Cyclic finished. Opening results for completed dates only; failed dates remain marked and excluded.');
+        setStatus('ready');onComplete('results');return;
       }
       if (run.status!=='completed') {
         const failed=run.records.find(row=>row.status==='failed') || run.records.find(row=>row.status==='cancelled');

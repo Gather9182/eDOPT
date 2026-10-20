@@ -75,6 +75,12 @@ cancellation stops scheduling and cancels active siblings. Completion is not
 reported until all workers settle. Completed days are retained; failed,
 cancelled and not-started dates remain distinct. The final summary lists every
 failed date and its cause, and any error keeps the overall result partial.
+After a finished run with at least one valid date, the UI opens Results
+automatically, including partial runs. Failed dates are red in the result
+calendar and summary, remain unselectable as valid schedules, and are excluded
+from cost, energy, peak and comparison calculations. A manually cancelled run
+retains the explicit partial-results button; a run with no valid days stays on
+the optimization page with diagnostics.
 
 In coupled serial fallback, a failed day has no proven end state. The next date
 starts a new independent segment using the configured initial conditions,
