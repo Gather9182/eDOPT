@@ -22,6 +22,14 @@ class OptimizationFailure(RuntimeError):
         self.diagnostics = diagnostics
 
 
+def solver_solution_status(problem):
+    # PuLP can assign LpStatusOptimal to a timed-out CBC incumbent while its
+    # separate solution status correctly says IntegerFeasible.
+    if problem.sol_status == pulp.LpSolutionIntegerFeasible:
+        return 'Feasible'
+    return pulp.LpStatus[problem.status]
+
+
 @contextmanager
 def diagnostic_paths():
     # Individual temporary files also work under Windows restricted accounts,
@@ -34,8 +42,19 @@ def diagnostic_paths():
             paths.append(Path(name))
         yield paths
     finally:
-        for path in paths:
-            path.unlink(missing_ok=True)
+        progress = current_progress.get()
+        if progress:
+            # Windows cannot unlink a log while a polling snapshot has it open.
+            # Disable further reads and wait for any reader under the same lock.
+            with progress.lock:
+                if progress.log_path in {str(path) for path in paths}:
+                    progress.read_log()
+                    progress.log_path = None
+                for path in paths:
+                    path.unlink(missing_ok=True)
+        else:
+            for path in paths:
+                path.unlink(missing_ok=True)
 
 
 def energy_relaxation(problem, inputs):
@@ -61,7 +80,8 @@ def energy_relaxation(problem, inputs):
     if not injections:
         return dict(status='Unavailable', findings=[], note=note)
     diagnostic.setObjective(pulp.lpSum(variable for _, _, variable in injections))
-    diagnostic.solve(CancellableCBC(msg=0, timeLimit=10))
+    limit = min(10,inputs.solver_time_limit_seconds)
+    diagnostic.solve(CancellableCBC(msg=0, timeLimit=limit, threads=0 if inputs.daily_cyclic else None))
     status = pulp.LpStatus[diagnostic.status]
     certified = diagnostic.sol_status == pulp.LpSolutionOptimal
     feasible = diagnostic.sol_status in (pulp.LpSolutionOptimal, pulp.LpSolutionIntegerFeasible)
@@ -73,7 +93,7 @@ def energy_relaxation(problem, inputs):
                 minute = inputs.horizon_start_minute + t * inputs.time_step_minutes
                 findings.append(dict(bus_id=bus_id, period=t, start_min=minute,
                     end_min=minute + inputs.time_step_minutes, missing_battery_energy_kwh=round(kwh, 6)))
-    return dict(status=status, minimum_proven=certified, time_limit_seconds=10, findings=findings,
+    return dict(status=status, minimum_proven=certified, time_limit_seconds=limit, findings=findings,
                 total_artificial_energy_kwh=round(sum(row['missing_battery_energy_kwh'] for row in findings), 6) if feasible else None,
                 note=note)
 
@@ -86,21 +106,22 @@ def solve_with_diagnostics(problem, inputs, solver_logs=None):
             raise OptimizationFailure('Individual check time budget exhausted.', dict(solver_status='Not Solved'))
         # An exact isolated check uses the original MILP rules, with no heuristic
         # fallback, artificial energy, or recursive failure diagnostics.
-        problem.solve(CancellableCBC(msg=0, timeLimit=min(5, remaining)))
+        problem.solve(CancellableCBC(msg=0, timeLimit=min(5, remaining, inputs.solver_time_limit_seconds), threads=0 if inputs.daily_cyclic else None))
         status = pulp.LpStatus[problem.status]
         if problem.sol_status in (pulp.LpSolutionOptimal, pulp.LpSolutionIntegerFeasible):
             return
         raise OptimizationFailure(f'Individual check ended with status: {status}', dict(solver_status=status))
     with diagnostic_paths() as (log_path, model_path):
+        limit = inputs.solver_time_limit_seconds
         execution_error = None
         progress = current_progress.get()
         if progress:
-            progress.start_solver(log_path,problem,180)
+            progress.start_solver(log_path,problem,limit)
         try:
-            problem.solve(CancellableCBC(msg=0, timeLimit=180, logPath=str(log_path)))
+            problem.solve(CancellableCBC(msg=0, timeLimit=limit, logPath=str(log_path), threads=0 if inputs.daily_cyclic else None))
         except Exception as error:
             execution_error = str(error)
-        status = 'Solver error' if execution_error is not None else pulp.LpStatus[problem.status]
+        status = 'Solver error' if execution_error is not None else solver_solution_status(problem)
         if progress:
             progress.finish_solver(status)
         if status in {'Optimal', 'Feasible'}:
@@ -108,7 +129,7 @@ def solve_with_diagnostics(problem, inputs, solver_logs=None):
         logs = list(solver_logs or []) + [f'[Solver] CBC ended with status: {status}.']
         diagnostics = dict(
             failed_at=datetime.now(timezone.utc).isoformat(), solver_status=status,
-            solver='CBC', time_limit_seconds=180, python_version=platform.python_version(), pulp_version=pulp.__version__,
+            solver='CBC', time_limit_seconds=limit, python_version=platform.python_version(), pulp_version=pulp.__version__,
             effective_inputs=inputs.model_dump(mode='json'), solver_logs=logs,
             cbc_log=log_path.read_text(encoding='utf-8', errors='replace') if log_path.exists() else '',
             model_statistics=dict(variables=problem.numVariables(), constraints=problem.numConstraints()),

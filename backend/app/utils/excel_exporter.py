@@ -638,7 +638,7 @@ class ExcelExporter:
         
         daily_rows = []
         for day in range(total_days):
-            date_label = (base_date + pd.Timedelta(days=day)).strftime("%Y-%m-%d")
+            date_label = (results.get('completed_dates') or [])[day] if results.get('completed_dates') else (base_date + pd.Timedelta(days=day)).strftime("%Y-%m-%d")
             start_idx = day * steps_per_day
             end_idx = (day + 1) * steps_per_day
             

@@ -3,6 +3,9 @@
 Stand: 20.10.2026. Ergänzt den ursprünglichen
 [Umsetzungsplan](longterm-shortterm-implementation-plan.md).
 
+Die anschließende optionale Parallelisierung und ihre Randbedingungen sind in
+[daily-cyclic-parallelization.md](daily-cyclic-parallelization.md) beschrieben.
+
 ## Bedienung und Umfang
 
 In Optimization Engine den Modus **Long-Term / Daily Cyclic** wählen,

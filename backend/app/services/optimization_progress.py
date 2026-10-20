@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import math
+import os
 import re
 import time
 import uuid
@@ -9,7 +10,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from pathlib import Path
-from threading import RLock
+from threading import RLock, BoundedSemaphore
 
 current_progress = ContextVar('optimization_progress', default=None)
 
@@ -172,12 +173,38 @@ def execute(inputs):
     return asyncio.run(run_optimization(inputs))
 
 
+def daily_worker_capacity():
+    """Conservative host cap, overridable downwards through EDOPT_DAILY_WORKERS."""
+    try:
+        requested = max(1,min(4,int(os.environ.get('EDOPT_DAILY_WORKERS','2'))))
+        if os.name == 'nt':
+            import ctypes
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [('length',ctypes.c_ulong),('load',ctypes.c_ulong)] + [(name,ctypes.c_ulonglong) for name in
+                    ('total_physical','available_physical','total_page','available_page','total_virtual','available_virtual','extended')]
+            memory = MemoryStatus();memory.length = ctypes.sizeof(memory)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory)):
+                return 1
+            available = memory.available_physical
+        else:
+            available = os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+        return max(1,min(requested,os.cpu_count() or 1,int(available//(2*1024**3))))
+    except (ValueError,OSError,AttributeError):
+        return 1
+
+
 class OptimizationJobs:
-    def __init__(self, runner=execute):
+    def __init__(self, runner=execute, daily_workers=None):
         self.runner = runner
         self.lock = RLock()
         self.jobs = {}
         self.executor = ThreadPoolExecutor(max_workers=1,thread_name_prefix='edopt-optimizer')
+        self.daily_workers = daily_worker_capacity() if daily_workers is None else max(1,min(4,daily_workers))
+        self.daily_executor = ThreadPoolExecutor(max_workers=self.daily_workers,thread_name_prefix='edopt-daily')
+        self.slots = BoundedSemaphore(self.daily_workers)
+
+    def capabilities(self):
+        return dict(daily_workers=self.daily_workers,daily_queue_capacity=8,cbc_threads_per_daily_job=1)
 
     def submit(self, inputs):
         with self.lock:
@@ -186,17 +213,23 @@ class OptimizationJobs:
             for key in finished:
                 if now-self.jobs[key].updated > 1800 or len(self.jobs) >= 8:
                     del self.jobs[key]
-            if sum(value.data['status'] in ('queued','running','cancelling') for value in self.jobs.values()) >= 4:
+            daily = bool(getattr(inputs,'daily_cyclic',False))
+            if sum(value.data['status'] in ('queued','running','cancelling') and value.daily == daily for value in self.jobs.values()) >= (8 if daily else 4):
                 raise RuntimeError('The optimization queue is full. Wait for an active run to finish.')
             key = uuid.uuid4().hex
             progress = Progress()
+            progress.daily = daily
             self.jobs[key] = progress
-            self.executor.submit(self._run,progress,inputs)
+            (self.daily_executor if daily else self.executor).submit(self._run,progress,inputs)
             return key
 
     def _run(self, progress, inputs):
         token = current_progress.set(progress)
+        acquired = False
         try:
+            while not self.slots.acquire(timeout=.1):
+                progress.check_cancelled()
+            acquired = True
             progress.check_cancelled()
             progress.update('precheck','Checking input data and energy bounds.',status='running')
             result = self.runner(inputs)
@@ -216,7 +249,13 @@ class OptimizationJobs:
                     progress.error['diagnostics'] = error.diagnostics
                 progress.update('failed','Optimization finished with an error. Review the diagnostic report.',status='failed')
         finally:
+            if acquired:
+                self.slots.release()
             current_progress.reset(token)
+
+    def shutdown(self):
+        self.executor.shutdown(wait=True)
+        self.daily_executor.shutdown(wait=True)
 
     def get(self, key):
         with self.lock:

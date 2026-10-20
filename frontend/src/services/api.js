@@ -47,10 +47,12 @@ export const validateInputs = async (inputs) => {
   return response.data;
 };
 
+export const optimizationCapabilities = async () => (await api.get('/optimize/capabilities')).data;
+
 export const historicalCalendar = async (start_date,end_date,resolution_min) =>
   (await api.get('/prices/historical-calendar',{params:{start_date,end_date,resolution_min}})).data;
-export const historicalDayPrices = async (date,resolution_min) =>
-  (await api.get('/prices/historical-day',{params:{date,resolution_min}})).data;
+export const historicalDayPrices = async (date,resolution_min,signal) =>
+  (await api.get('/prices/historical-day',{params:{date,resolution_min},signal})).data;
 
 export const fetchAWattarPrices = async (date) => {
   const response = await api.get(`/prices/awattar?date=${date}`);

@@ -3,6 +3,12 @@ import {socPolicyInputs} from './socPolicy.js';
 
 export const repeatProfile = (values,length) => Array.from({length},(_,i) => values?.length ? values[i%values.length] : 0);
 
+export function solverTimeLimitIssues(settings) {
+  const value=settings.solver_time_limit_seconds ?? 180;
+  return Number.isInteger(value) && value>=1 && value<=86400 ? [] : [{type:'ERROR',category:'data',code:'SOLVER_TIME_LIMIT',
+    message:'Solver time limit must be a whole number between 1 and 86400 seconds.'}];
+}
+
 export function effectivePrices(market,assumptions) {
   const config = assumptions || {supplier_markup:10,variable_network_charge:15,other_variable_levies:0,electricity_tax:8.2,use_vat:false,pricing_mode:'effective'};
   if (!market.every(Number.isFinite)) throw new Error('Price series contains missing or invalid values.');
@@ -17,10 +23,14 @@ export function buildSolverInputs(project,settings,{buses=project.buses || [],sc
   marketPrices=project.pricing || [],prices=effectivePrices(marketPrices,project.meta?.price_assumptions),
   horizonStart=0,cyclicConnections=true,daily=false,initialEnergies={},initialConnections,pvConfig=null,bessConfig=null}={}) {
   const periods=hours*60/settings.time_resolution;
+  const solverLimit=settings.solver_time_limit_seconds ?? project.constraints?.solver_time_limit_seconds ?? 180;
+  const limitIssues=solverTimeLimitIssues({solver_time_limit_seconds:solverLimit});
+  if (limitIssues.length) throw new Error(limitIssues[0].message);
   if (!Number.isInteger(periods) || periods<=0) throw new Error('Horizon must contain a whole number of time steps.');
   const initialFraction=project.meta?.initial_soc_fraction;
   const reserveFraction=project.meta?.min_final_soc_fraction;
   return {scenario,...chargingInputs(project),...socPolicyInputs(settings),
+    solver_time_limit_seconds:solverLimit,
     planning_horizon_hours:hours,time_step_minutes:settings.time_resolution,horizon_start_minute:horizonStart,
     cyclic_connections:cyclicConnections,...(daily ? {daily_cyclic:true,use_cyclic_soc:true} : {}),
     use_next_day_readiness:daily ? false : settings.use_next_day_readiness,

@@ -134,6 +134,7 @@ class OptimizationInputs(BaseModel):
     scenario: str = Field("baseline", description="Scenario mode: baseline, pv, bess, pv_bess")
     planning_horizon_hours: int = Field(24, description="Total hours (T)")
     time_step_minutes: int = Field(15, ge=1, le=1440, description="Duration of each discrete period (delta_t)")
+    solver_time_limit_seconds: int = Field(180, ge=1, le=86400, description="CBC time budget per solve, excluding model preparation; soft SoC and multi-day runs may require multiple solves")
     buses: List[BusUmlauf]
     electricity_prices: List[float] = Field(..., description="Effective Price per MWh (incl. markups) (p_t)")
     market_prices: List[float] = Field(default_factory=list, description="Original wholesale Market Price per MWh")
@@ -145,6 +146,8 @@ class OptimizationInputs(BaseModel):
     use_next_day_readiness: bool = Field(False, description="Enforce final SoC enough for next day's first trips")
     use_cyclic_soc: bool = Field(False, description="Require each bus to end the repeated 24-hour day at its initial battery energy")
     daily_cyclic: bool = False
+    daily_boundary_seed: bool = False
+    daily_connection_boundary: Dict[str, Dict[str, Literal[0, 1]]] = Field(default_factory=dict)
     charging_curve: ChargingCurve = Field(default_factory=ChargingCurve)
     operating_min_soc_mode: Literal['off', 'hard', 'soft'] = 'off'
     operating_min_soc_fraction: float = Field(0.1, ge=0, le=1, allow_inf_nan=False)
@@ -154,6 +157,10 @@ class OptimizationInputs(BaseModel):
 
     @model_validator(mode='after')
     def valid_operating_soc_band(self):
+        if (self.daily_boundary_seed or self.daily_connection_boundary) and not self.daily_cyclic:
+            raise ValueError('Independent daily connection boundaries require Daily Cyclic.')
+        if self.daily_boundary_seed and self.daily_connection_boundary:
+            raise ValueError('Choose a seed or fixed daily connection boundaries, not both.')
         if self.daily_cyclic and (self.scenario != 'baseline' or not self.use_cyclic_soc):
             raise ValueError('Daily Cyclic supports Baseline with the daily cyclic bus SoC condition enabled.')
         if self.use_cyclic_soc:
@@ -243,7 +250,7 @@ class OptimizationResult(BaseModel):
     electricity_prices: List[float] # The price series used (Effective EUR/MWh)
     market_prices: List[float] = [] # Original wholesale prices (EUR/MWh)
     bus_diagnostics: List[BusDiagnostic] # Per-bus health metrics
-    optimization_gap: float
+    optimization_gap: Optional[float] = None
     status: str
     solver_logs: List[str] = Field(default_factory=list)
     connection_schedules: Dict[str, List[str]] = Field(default_factory=dict)

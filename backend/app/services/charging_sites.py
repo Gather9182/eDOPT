@@ -75,6 +75,8 @@ def validate_sites(inputs):
 
 
 def add_site_constraints(prob, inputs, power, grid_import=None, energy_flows=None, opportunities=None):
+    from .daily_boundary import validate_daily_boundary
+    boundary_pairs = validate_daily_boundary(inputs)
     if not inputs.charging_sites:
         return None
     validate_sites(inputs)
@@ -143,6 +145,14 @@ def add_site_constraints(prob, inputs, power, grid_import=None, energy_flows=Non
                     and present[0] and present[-1] and not arrivals[0]
                     and is_switch_blocked(site, inputs.horizon_start_minute)):
                 prob += connected[(bus.id, site.id, 0)] == connected[(bus.id, site.id, n-1)]
+            if (bus.id,site.id) in boundary_pairs:
+                first,last = connected[(bus.id,site.id,0)],connected[(bus.id,site.id,n-1)]
+                if inputs.daily_boundary_seed:
+                    prob += first == last
+                else:
+                    fixed = inputs.daily_connection_boundary[bus.id][site.id]
+                    prob += first == fixed
+                    prob += last == fixed
         for t in range(n):
             prob += pulp.lpSum(connected[(bus.id, s.id, t)] for s in sites) <= 1
             prob += power[(bus.id, t)] == pulp.lpSum(site_power[(bus.id, s.id, t)] for s in sites)

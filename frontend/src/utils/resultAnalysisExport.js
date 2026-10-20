@@ -1,6 +1,7 @@
 import { diagnosticClone } from './diagnosticExport.js';
 import { loadTimetableSource } from './timetableImport.js';
 import { buildChargingSessions } from './chargingOrigin.js';
+import {calendarDayIndex} from './dailyBoundary.js';
 
 const json = value => JSON.stringify(value ?? null, null, 2);
 const present = value => value !== null && value !== undefined;
@@ -72,13 +73,14 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
     {name:'environment_at_export.json',data:json(environment)},
   ];
   if (results.long_term_mode === 'daily_cyclic') {
-    files.push({name:'run/days/status.json',data:json({status:results.run_status,scope:results.timetable_scope,days:results.day_records,failed_attempts:results.failed_attempts || []})});
+    files.push({name:'run/days/status.json',data:json({status:results.run_status,scope:results.timetable_scope,execution:results.daily_execution,completed_dates:results.completed_dates,completed_day_indices:results.completed_day_indices,days:results.day_records,failed_attempts:results.failed_attempts || []})});
     for (const [index,day] of (results.daily_results || []).entries()) {
       const prefix=`run/days/day_${String(index+1).padStart(5,'0')}`;
       files.push({name:`${prefix}/request.json`,data:json(day.request)},{name:`${prefix}/prices.json`,data:json(day.prices)},
         {name:`${prefix}/result.json`,data:json(day.result)},{name:`${prefix}/date.json`,data:json({date:day.date,day_index:day.day_index})});
     }
     files.push({name:'tables/daily_summary.csv',data:objectCsv((results.day_records || []).map(day=>({date:day.date,status:day.status,
+      solver_status:day.solver_status,optimality_proven:day.optimality_proven,
       cost_eur:day.reconciliation?.cost_eur,grid_energy_kwh:day.reconciliation?.grid_energy_kwh,charger_energy_mwh:day.reconciliation?.charger_energy_mwh,error:day.error?.detail})),['date','status','cost_eur','grid_energy_kwh','charger_energy_mwh'])},
       {name:'tables/daily_soc_connections.csv',data:objectCsv(results.end_condition?.buses || [],['date','day_index','bus_id','initial_soc_kwh','final_soc_kwh','previous_final_soc_kwh','initial_connection','previous_final_connection','final_connection','compliant'])},
       {name:'tables/daily_prices.csv',data:objectCsv((results.daily_results || []).flatMap(day=>day.prices.timestamps.map((timestamp,t)=>({date:day.date,timestamp,market_price_eur_mwh:day.prices.market_prices[t],effective_price_eur_mwh:day.request.electricity_prices[t]}))),['date','timestamp','market_price_eur_mwh','effective_price_eur_mwh'])});
@@ -124,16 +126,20 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
   }
   if (!sources.some(source => source.scope === 'run' && source.status === 'included')) missing.push('The original timetable for this run is unavailable. A current-project source, if included, is identified separately and is not assumed to match the run.');
 
-  const series = entries(results).filter(([,values]) => Array.isArray(values) && values.length && values.every(value => typeof value === 'number' || value === null));
+  const series = entries(results).filter(([key,values]) => key!=='completed_day_indices' && Array.isArray(values) && values.length && values.every(value => typeof value === 'number' || value === null));
+  const calendarMinute = t => usableStep ? calendarDayIndex(results,Math.floor(t*step/1440))*1440+(t*step)%1440 : null;
   const maxPeriods = series.reduce((max,[,values]) => Math.max(max,values.length),0);
   files.push({name:'tables/fleet_timeseries.csv',data:csv((function* () {
-    yield ['Period_zero_based','Minutes_from_start',...series.map(([key]) => key)];
-    for (let t=0;t<maxPeriods;t++) yield [t,usableStep ? t*step : null,...series.map(([,values]) => values[t])];
+    yield ['Period_zero_based','Minutes_from_start',...(results.completed_dates ? ['Calendar_date','Calendar_minutes_from_start'] : []),...series.map(([key]) => key)];
+    for (let t=0;t<maxPeriods;t++) {
+      const slot=usableStep ? Math.floor(t*step/1440) : null;
+      yield [t,calendarMinute(t),...(results.completed_dates ? [results.completed_dates[slot],calendarMinute(t)] : []),...series.map(([,values]) => values[t])];
+    }
   })())});
   files.push({name:'tables/summary.csv',data:csv([['Metric','Saved_value'],...entries(results).filter(([,value]) => typeof value !== 'object')])});
 
   const profileSets = (single, byDay) => results.is_long_term && results[byDay]
-    ? entries(results[byDay]).map(([day,profiles]) => ({day:Number(day),profiles:profiles || {},offset:usableStep ? Number(day)*1440/step : null}))
+    ? entries(results[byDay]).map(([day,profiles]) => ({day:calendarDayIndex(results,day),profiles:profiles || {},profileOffset:usableStep ? Number(day)*1440/step : null,offset:usableStep ? calendarDayIndex(results,day)*1440/step : null}))
     : [{day:null,profiles:results[single] || {},offset:0}];
   function* busProfileRows(single,byDay,column) {
     yield ['Route','Day_zero_based','Period_in_profile','Global_period','Minutes_from_start',column];
@@ -156,7 +162,7 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
     }
   }
   const diagnostics = list(results.bus_diagnostics).map(row => ({day_index:null,...row}));
-  for (const [day,rows] of entries(results.diagnostics_by_day)) for (const row of list(rows)) diagnostics.push({day_index:Number(day),...row});
+  for (const [day,rows] of entries(results.diagnostics_by_day)) for (const row of list(rows)) diagnostics.push({day_index:calendarDayIndex(results,day),date:results.completed_dates?.[day],...row});
   files.push({name:'tables/bus_diagnostics.csv',data:objectCsv(diagnostics,['day_index','id'])});
 
   const sites = inputs?.charging_sites || [];
@@ -167,12 +173,12 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
       yield ['Charging_site','Period_zero_based','Minutes_from_start','Load_kW','Grid_import_kW','Occupied_connectors'];
       for (const id of siteIds) {
         const load = results.site_load_profiles?.[id] || [], grid = results.site_grid_import_profiles?.[id] || [], occupied = results.site_occupied_connectors?.[id] || [];
-        for (let t=0;t<Math.max(load.length,grid.length,occupied.length);t++) yield [id,t,usableStep ? t*step : null,load[t],grid[t],occupied[t]];
+        for (let t=0;t<Math.max(load.length,grid.length,occupied.length);t++) yield [id,t,calendarMinute(t),load[t],grid[t],occupied[t]];
       }
     })())},
     {name:'tables/bus_connections.csv',data:csv((function* () {
       yield ['Route','Period_zero_based','Minutes_from_start','Connected_site'];
-      for (const [id,values] of entries(results.connection_schedules)) for (const [t,site] of list(values).entries()) yield [id,t,usableStep ? t*step : null,site];
+      for (const [id,values] of entries(results.connection_schedules)) for (const [t,site] of list(values).entries()) yield [id,t,calendarMinute(t),site];
     })())});
   files.push({name:'run/operating_soc_policy.json',data:json(results.soc_policy || null)},
     {name:'tables/operating_soc_deviations.csv',data:objectCsv(results.soc_policy?.violations || [],['bus_id','minute','state_index','kind','soc_kwh','limit_kwh','deviation_kwh','soc_percent','initial_state'])});
@@ -187,8 +193,8 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
   files.push({name:'tables/charging_sessions.csv',data:csv((function* () {
     yield ['Route','Day_zero_based','Global_start_min','Global_end_min','Origin','Site_ID','Site_name','Average_kW','Grid_energy_kWh','Round_trip_km','Driving_minutes','Explanation'];
     if (!usableStep) return;
-    for (const {day,profiles,offset} of profileSets('schedules','schedules_by_day')) {
-      for (const [id,schedule] of entries(profiles)) for (const session of buildChargingSessions(results,id,{schedule,offsetMinutes:offset*step})) {
+    for (const {day,profiles,offset,profileOffset} of profileSets('schedules','schedules_by_day')) {
+      for (const [id,schedule] of entries(profiles)) for (const session of buildChargingSessions(results,id,{schedule,offsetMinutes:(profileOffset ?? offset)*step})) {
         yield [id,day,offset*step+session.startTimeMin,offset*step+session.endTimeMin,session.origin,session.siteId,session.siteName,
           session.avgKw,session.totalKwh,session.visit?.distance_km,session.visit ? session.travelMinutes : null,session.explanation];
       }

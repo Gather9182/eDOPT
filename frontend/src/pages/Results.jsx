@@ -3,6 +3,7 @@ import { arrivalComparison } from '../utils/arrivalComparison';
 import SocPolicyResults from '../components/SocPolicyResults';
 import EndConditionResults from '../components/EndConditionResults';
 import DailyCyclicSummary from '../components/DailyCyclicSummary';
+import {calendarDayIndex,completedSlotForCalendarDay} from '../utils/dailyBoundary';
 import ChargingCurveResults from '../components/ChargingCurveResults';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area,
@@ -59,7 +60,7 @@ const SimulationDatePicker = ({ results, selectedDay, setSelectedDay, setAuditAc
     
     // Show Current Selection's Month or First Month
     const focalDate = selectedDay !== null 
-      ? new Date(baseDate.getTime() + selectedDay * 86400000) 
+      ? new Date(baseDate.getTime() + calendarDayIndex(results,selectedDay) * 86400000)
       : new Date(baseDate);
     
     focalDate.setMonth(focalDate.getMonth() + calendarOffset);
@@ -96,7 +97,7 @@ const SimulationDatePicker = ({ results, selectedDay, setSelectedDay, setAuditAc
             
             {Array.from({ length: daysInMonth }).map((_, i) => {
               const dNum = i + 1;
-              const dayIndex = firstDayIndex + i;
+              const dayIndex = completedSlotForCalendarDay(results,firstDayIndex + i);
               
               const exists = dailyOverviewData[dayIndex];
               const isActive = selectedDay === dayIndex;
@@ -231,7 +232,7 @@ const SimulationDatePicker = ({ results, selectedDay, setSelectedDay, setAuditAc
               }}>
                 <span>{new Date(results.run_metadata?.inputs?.start_date || results.run_metadata?.settings?.longTermConfig?.startDate || '2026-01-01').toLocaleDateString('default', { day: 'numeric', month: 'long', year: 'numeric' })}</span>
                 <span style={{ color: '#d1d5db' }}>—</span>
-                <span>{new Date(new Date(results.run_metadata?.inputs?.start_date || results.run_metadata?.settings?.longTermConfig?.startDate || '2026-01-01').getTime() + (dailyOverviewData.length - 1) * 86400000).toLocaleDateString('default', { day: 'numeric', month: 'long', year: 'numeric' })}</span>
+                <span>{new Date(new Date(results.run_metadata?.inputs?.start_date || results.run_metadata?.settings?.longTermConfig?.startDate || '2026-01-01').getTime() + calendarDayIndex(results,dailyOverviewData.length - 1) * 86400000).toLocaleDateString('default', { day: 'numeric', month: 'long', year: 'numeric' })}</span>
               </div>
               <button 
                 onClick={() => setSelectedDay(null)}
@@ -438,7 +439,7 @@ const SimulationDatePicker = ({ results, selectedDay, setSelectedDay, setAuditAc
                   Selected: <strong style={{ color: '#111827' }}>Day {Number(selectedDay) + 1}</strong> ({
                     (() => {
                       const baseDate = new Date(results.run_metadata?.inputs?.start_date || results.run_metadata?.settings?.longTermConfig?.startDate || '2026-01-01');
-                      const selDate = new Date(baseDate.getTime() + Number(selectedDay) * 86400000);
+                      const selDate = new Date(baseDate.getTime() + calendarDayIndex(results,selectedDay) * 86400000);
                       return selDate.toLocaleDateString('default', { day: 'numeric', month: 'long', year: 'numeric' });
                     })()
                   }) — <strong style={{ color: '#10b981' }}>€{dailyOverviewData[Number(selectedDay)]?.totalCost.toFixed(0)}</strong> cost

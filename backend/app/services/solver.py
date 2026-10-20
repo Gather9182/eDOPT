@@ -13,6 +13,7 @@ from .end_conditions import end_target, add_end_condition, reference_end_issues,
 from .charging_curve import add_charging_curve, max_curve_energy, charging_curve_results
 from .optimization_progress import report_progress, check_cancelled
 from .automatic_charging import add_automatic_charging
+from .solver_diagnostics import solver_solution_status
 
 def simulate_baseline_load(inputs: OptimizationInputs, with_issues=False, minimum_soc_deviation=None):
     """
@@ -458,7 +459,7 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
                            (pv_gen_profile,pv_curtailed,b_charge,b_discharge,b_soc,bess_cfg),solver_logs)
     # --- Solve ---
     minimum_soc_deviation = solve_soc_policy(prob, inputs, soc_vars, solver_logs)
-    status = pulp.LpStatus[prob.status]
+    status = solver_solution_status(prob)
     report_progress('processing_results','Building charging schedules and reference comparison.',metrics={})
 
     # --- Extract Results ---
@@ -587,7 +588,7 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
         electricity_prices=inputs.electricity_prices,
         market_prices=inputs.market_prices,
         bus_diagnostics=bus_diagnostics,
-        optimization_gap=0.0,
+        optimization_gap=0.0 if status=='Optimal' else None,
         status=f"Scenario {inputs.scenario} solved ({status})",
         ambient_temperature_profile_c=ambient_temp_prof,
         bess_cell_temperature_profile_c=cell_temp_prof,
@@ -644,7 +645,7 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
     curve_elapsed = add_charging_curve(prob, inputs, p_vars, soc_vars, site_state, solver_logs)
     add_automatic_charging(prob, inputs, soc_vars, site_state, opportunities, curve_elapsed,logs=solver_logs)
     minimum_soc_deviation = solve_soc_policy(prob, inputs, soc_vars, solver_logs)
-    status = pulp.LpStatus[prob.status]
+    status = solver_solution_status(prob)
     report_progress('processing_results','Building charging schedules and reference comparison.',metrics={})
 
     schedules = {}
@@ -715,6 +716,6 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
         pv_to_bus_profile=[0.0] * num_periods,
         bess_to_bus_profile=[0.0] * num_periods,
         grid_to_bus_profile=[round(x, 4) for x in aggregated_profile.tolist()],
-        optimization_gap=0.0,
+        optimization_gap=0.0 if status=='Optimal' else None,
         status=f"{status} (Baseline Optimized)"
     )

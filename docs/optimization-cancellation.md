@@ -1,5 +1,15 @@
 # Optimization cancellation
 
+The **Advanced & Solver Settings** card also exposes **Maximum solver time per pass
+(seconds)**. Default: 180; accepted range: 1–86400 whole seconds. The value is
+saved in project constraints as `solver_time_limit_seconds` and included in all
+scenario/day/chunk requests, live telemetry and failure evidence. Each soft-SoC
+stage receives this budget separately. Diagnostic solves retain their shorter
+caps (10 seconds for relaxation, up to 5 seconds per isolated solve) and also
+respect smaller user limits. CBC's solve budget excludes data loading and model
+preparation; it is not a deadline for the complete run. The old unused
+`meta.time_limit` field is not treated as an effective previous solver setting.
+
 During a run, **Cancel optimization** requests cancellation of that run's job.
 The interface waits for backend confirmation before returning to the settings.
 The job API exposes `POST /api/optimize/jobs/{job_id}/cancel`; status progresses

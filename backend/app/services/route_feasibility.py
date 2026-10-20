@@ -30,6 +30,7 @@ async def classify_routes(inputs, findings=(), budget_seconds=20):
             continue
         isolated = inputs.model_copy(deep=True)
         isolated.buses = [bus.model_copy(deep=True)]
+        isolated.daily_connection_boundary = {bus.id:inputs.daily_connection_boundary[bus.id]} if bus.id in inputs.daily_connection_boundary else {}
         token = route_solve_deadline.set(deadline)
         try:
             await run_scenario_optimization(isolated, [])

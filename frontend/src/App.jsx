@@ -38,7 +38,6 @@ function App() {
         time_resolution: 15,
         scenario_name: 'Baseline_Depot_2026',
         optimality_gap: 0.1,
-        time_limit: 60,
         price_assumptions: {
           supplier_markup: 10.0,
           variable_network_charge: 15.0,
@@ -81,7 +80,6 @@ function App() {
         time_resolution: 15,
         scenario_name: 'Baseline_Depot_2026',
         optimality_gap: 0.1,
-        time_limit: 60,
         price_assumptions: {
           supplier_markup: 10.0,
           variable_network_charge: 15.0,

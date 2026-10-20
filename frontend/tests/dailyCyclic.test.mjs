@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {buildSolverInputs,effectivePrices} from '../src/utils/solverInputs.js';
+import {buildSolverInputs,effectivePrices,solverTimeLimitIssues} from '../src/utils/solverInputs.js';
 import {runDailyCyclic,aggregateDailyRun,verifyDailyResult,dailyConfigurationIssues} from '../src/utils/dailyCyclic.js';
 import {optimizationFleet} from '../src/utils/optimizationFleet.js';
 import {endConditionIssues} from '../src/utils/socPolicy.js';
@@ -30,7 +30,7 @@ function fixture() {
       lock_charging_mode:'automatic_balanced',no_switch_windows:[{start:'00:00',end:'00:00'}],allow_connect_on_arrival:true}]}};
   const settings={planning_horizon:24,time_resolution:720,charger_capacity_kw:0,grid_limit_kw:0,num_chargers:0,use_cyclic_soc:true,use_next_day_readiness:false,
     operating_min_soc_mode:'hard',operating_min_soc_fraction:.1,operating_max_soc_enabled:true,operating_max_soc_mode:'soft',operating_max_soc_fraction:.9};
-  return {project,settings,buses:optimizationFleet(project).included};
+  return {project,settings,buses:optimizationFleet(project).included,concurrency:1};
 }
 function solved(request) {
   const p=5/12,price=request.electricity_prices[1];
@@ -40,6 +40,19 @@ function solved(request) {
     baseline_cost_eur:null,baseline_issues:['No valid reference'],bus_diagnostics:[{id:'B'}]};
 }
 const priceDay=(date,market=[100,200])=>({date,coverage:'complete',market_prices:market,timestamps:[`${date}T00:00:00+01:00`,`${date}T12:00:00+01:00`]});
+
+test('selected solver budget is validated and shared by short, daily and flexible requests',()=>{
+  const {project,settings,buses}=fixture();
+  assert.equal(buildSolverInputs(project,settings,{buses}).solver_time_limit_seconds,180);
+  assert.equal(buildSolverInputs({...project,constraints:{solver_time_limit_seconds:41}},settings,{buses}).solver_time_limit_seconds,41);
+  for(const options of [{buses},{buses,daily:true},{buses,hours:72,cyclicConnections:false}]) {
+    assert.equal(buildSolverInputs(project,{...settings,solver_time_limit_seconds:37},options).solver_time_limit_seconds,37);
+  }
+  for(const value of [0,-1,1.5,86401,NaN,Infinity,'']) {
+    assert.equal(solverTimeLimitIssues({solver_time_limit_seconds:value}).length,1);
+    assert.throws(()=>buildSolverInputs(project,{...settings,solver_time_limit_seconds:value},{buses}),/Solver time limit/);
+  }
+});
 
 test('shared request keeps selected fleet, SoC settings, zero reserve and technical rules unchanged',()=>{
   const {project,settings,buses}=fixture();

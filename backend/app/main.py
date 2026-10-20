@@ -18,6 +18,11 @@ from .services.optimization_progress import OptimizationJobs
 optimization_jobs = OptimizationJobs()
 
 
+@app.get('/api/optimize/capabilities')
+def optimization_capabilities():
+    return optimization_jobs.capabilities()
+
+
 @app.post('/api/optimize/jobs', status_code=202)
 def start_optimization_job(inputs: OptimizationInputs):
     try:

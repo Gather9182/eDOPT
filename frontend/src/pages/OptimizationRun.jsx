@@ -5,8 +5,8 @@ import {chargingCurveIssues} from '../utils/chargingCurve';
 import {socPolicyInputs, socPolicyIssues, mergeSocPolicies, endConditionPatch, endConditionIssues} from '../utils/socPolicy';
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Zap, Terminal, Battery, Clock, CheckCircle, AlertCircle, Loader2, Table as TableIcon, Info, Save, ChevronDown, ChevronUp, Sun, Layers, LayoutDashboard, Activity, Sliders, MapPin, Navigation } from 'lucide-react';
-import { runOptimization as callOptimizeApi, validateInputs, API_BASE, historicalCalendar, historicalDayPrices } from '../services/api';
-import {buildSolverInputs,effectivePrices} from '../utils/solverInputs';
+import { runOptimization as callOptimizeApi, validateInputs, API_BASE, historicalCalendar, historicalDayPrices, optimizationCapabilities } from '../services/api';
+import {buildSolverInputs,effectivePrices,solverTimeLimitIssues} from '../utils/solverInputs';
 import {dailyConfigurationIssues,runDailyCyclic,aggregateDailyRun} from '../utils/dailyCyclic';
 import { generateDefaultPrices } from '../utils/dataMapping';
 import { getItem, setItem } from '../utils/db';
@@ -82,6 +82,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     planning_horizon: projectData.meta?.planning_horizon || 24,
     time_resolution: projectData.meta?.time_resolution || 15,
     num_chargers: projectData.constraints?.num_chargers || 50,
+    solver_time_limit_seconds:projectData.constraints?.solver_time_limit_seconds ?? 180,
     use_next_day_readiness: projectData.constraints?.use_cyclic_soc ? false : projectData.constraints?.use_next_day_readiness ?? true
   });
   const [validationState, setValidationState] = useState(null);
@@ -93,6 +94,9 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
   const analysisRunRef = useRef(null);
   const runAbortRef = useRef(null);
   const [isCancelling,setIsCancelling] = useState(false);
+  const pendingJobsRef = useRef(0);
+  const [dayLiveProgress,setDayLiveProgress] = useState({});
+  const [dayStatuses,setDayStatuses] = useState({});
   const logsRef = useRef([]);
   const validationVersionRef = useRef(0);
   const [isValidating, setIsValidating] = useState(false);
@@ -106,7 +110,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     const today = new Date();
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(today.getDate() - 7);
-    return { startDate:sevenDaysAgo.toISOString().split('T')[0],endDate:today.toISOString().split('T')[0],chunkSizeHours:24 };
+    return { startDate:sevenDaysAgo.toISOString().split('T')[0],endDate:today.toISOString().split('T')[0],chunkSizeHours:24,dailyWorkers:2 };
   });
   const { included: activeBuses, excluded: excludedBuses } = optimizationFleet(projectData);
   // A check applies only to the fleet and settings that were actually checked.
@@ -241,36 +245,43 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     {browser:navigator.userAgent,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,language:navigator.language,frontend_mode:import.meta.env.MODE,api_base:API_BASE},
     activeBuses.map(bus => bus.id));
 
-  const requestOptimization = async (inputs, attempt = {}) => {
-    checkOptimizationCancelled(runAbortRef.current?.signal);
-    optimizationAttemptRef.current = {context:{...(analysisRunRef.current?.context || failureContext()),checked_at:new Date().toISOString()},request:diagnosticClone(inputs),
+  const requestOptimization = async (inputs, attempt = {}, {signal=runAbortRef.current?.signal} = {}) => {
+    checkOptimizationCancelled(signal);
+    const captured = {context:{...(analysisRunRef.current?.context || failureContext()),checked_at:new Date().toISOString()},request:diagnosticClone(inputs),
       attempt:{scenario:inputs.scenario,mode:simulationMode,...attempt}};
+    if (!attempt.date) optimizationAttemptRef.current = captured;
+    pendingJobsRef.current++;
     setSolverPending(true);
-    setLiveProgress(null);
+    if (!attempt.date) setLiveProgress(null);
     let lastEventSequence = 0;
     let result;
     try {
-      result = await callOptimizeApi(inputs,{signal:runAbortRef.current?.signal,onProgress:state => {
-        setLiveProgress(state);
+      result = await callOptimizeApi(inputs,{signal,onProgress:state => {
+        if (attempt.date) {
+          setDayLiveProgress(previous=>({...previous,[attempt.date]:state}));
+          if (['queued','running','cancelling'].includes(state.status)) setDayStatuses(previous=>({...previous,[attempt.date]:state.status}));
+        }
+        else setLiveProgress(state);
         for (const event of state.events || []) {
           if (event.sequence > lastEventSequence) {
-            addLog(event.message);
+            addLog(attempt.date ? `[${attempt.date}] ${event.message}` : event.message);
             lastEventSequence = event.sequence;
           }
         }
       }});
     } finally {
-      setSolverPending(false);
+      pendingJobsRef.current--;
+      setSolverPending(pendingJobsRef.current>0);
     }
     if (attempt.chunk_number && analysisRunRef.current) {
-      const record = await archiveChunkRequest(optimizationAttemptRef.current.request,attempt,analysisRunRef.current.id,setItem,result);
+      const record = await archiveChunkRequest(captured.request,attempt,analysisRunRef.current.id,setItem,result);
       analysisRunRef.current.requests.push(record);
       if (record.status !== 'stored') addLog(`Analysis archive warning: Exact inputs for chunk ${attempt.chunk_number} could not be saved: ${record.error}`);
       if (simulationMode === 'long_term') await setItem(`optimization_checkpoint_${analysisRunRef.current.id}_${attempt.chunk_number}`,{
-        request:optimizationAttemptRef.current.request,result,attempt,run_id:analysisRunRef.current.id});
+        request:captured.request,result,attempt,run_id:analysisRunRef.current.id});
     }
-    checkOptimizationCancelled(runAbortRef.current?.signal);
-    optimizationAttemptRef.current = null;
+    checkOptimizationCancelled(signal);
+    if (!attempt.date) optimizationAttemptRef.current = null;
     return result;
   };
 
@@ -331,6 +342,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         return {
           scenario: targetScenario,
           planning_horizon_hours: 24,
+          solver_time_limit_seconds:localSettings.solver_time_limit_seconds,
           ...socPolicyInputs(localSettings),
           time_step_minutes: 15,
           buses: Array.from({ length: 42 }, (_, i) => ({
@@ -444,6 +456,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     setDailyRunSummary(null);
     runAbortRef.current = new AbortController();
     setIsCancelling(false);
+    setDayLiveProgress({});setDayStatuses({});pendingJobsRef.current=0;
+    setLiveProgress(null);
     optimizationAttemptRef.current = null;
     analysisRunRef.current = {id:crypto.randomUUID(),context:failureContext(),requests:[]};
     if (simulationMode === 'single') {
@@ -467,16 +481,35 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       if (issues.length) throw new Error(issues.map(issue=>issue.message).join(' '));
       addLog('Validating historical calendar in Europe/Vienna. Daily Cyclic repeats the configured timetable; no calendar-day timetable changes.');
       const {dates}=await historicalCalendar(longTermConfig.startDate,longTermConfig.endDate,settings.time_resolution);
+      let capacity=1;
+      try {
+        const reported=(await optimizationCapabilities()).daily_workers;
+        capacity=Number.isInteger(reported) && reported>=1 ? Math.min(4,reported) : 1;
+      }
+      catch { addLog('Backend parallel capability could not be confirmed. Using one day worker.'); }
+      const concurrency=Math.min(longTermConfig.dailyWorkers || 2,capacity);
+      addLog(`Daily Cyclic: requested ${longTermConfig.dailyWorkers || 2} worker(s), host permits ${capacity}, using at most ${concurrency}.`);
+      setDayStatuses(Object.fromEntries(dates.map(date=>[date,'not_calculated'])));
       const run=await runDailyCyclic({project,settings,buses,dates,
-        fetchPrices:async date=>{
-          checkOptimizationCancelled(runAbortRef.current?.signal);
-          const prices=await historicalDayPrices(date,settings.time_resolution);
-          checkOptimizationCancelled(runAbortRef.current?.signal);
-          return prices;
+        concurrency,signal:runAbortRef.current?.signal,
+        onDayProgress:day=>setDayStatuses(previous=>({...previous,[day.date]:day.status})),
+        fetchPrices:async (date,{signal=runAbortRef.current?.signal}={})=>{
+          checkOptimizationCancelled(signal);
+          try {
+            const prices=await historicalDayPrices(date,settings.time_resolution,signal);
+            checkOptimizationCancelled(signal);
+            return prices;
+          } catch(error) {
+            checkOptimizationCancelled(signal);throw error;
+          }
         },optimize:requestOptimization,notify:addLog,
         checkpoint:async record=>{
           const key=`daily-cyclic-${runId}-${record.date}`;
-          await setItem(key,record);keys.push({date:record.date,key,status:record.status});
+          await setItem(key,record);
+          const entry={date:record.date,key,status:record.status};
+          const existing=keys.findIndex(value=>value.date===record.date);
+          if (existing>=0) keys[existing]=entry;else keys.push(entry);
+          keys.sort((a,b)=>a.date.localeCompare(b.date));
           await setItem(`daily-cyclic-${runId}-manifest`,{run_id:runId,dates,project,settings,records:keys});
         }});
       const payload=aggregateDailyRun(run);
@@ -488,8 +521,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         await setItem('optimization_results',payload);
       }
       if (run.status!=='completed') {
-        const failed=run.records.find(row=>row.status==='failed' || row.status==='cancelled');
-        optimizationAttemptRef.current ||= {context:failureContext(),request:failed.request,attempt:{date:failed.date,mode:'daily_cyclic',phase:failed.request ? 'daily_solve_or_check' : 'historical_prices'}};
+        const failed=run.records.find(row=>row.status==='failed') || run.records.find(row=>row.status==='cancelled');
+        optimizationAttemptRef.current = {context:failureContext(),request:failed.request,attempt:{date:failed.date,mode:'daily_cyclic',phase:failed.request ? 'daily_solve_or_check' : 'historical_prices'}};
         recordOptimizationFailure(run.error);
         setDailyRunSummary({status:run.status,date:failed.date,completed:run.records.filter(row=>row.status==='completed').length});
         addLog(`Daily Cyclic stopped at ${failed.date}. Completed days remain saved; no routes were excluded.`);
@@ -859,6 +892,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                 min_final_soc_fraction: projectData.meta.min_final_soc_fraction ?? .2,
                 charger_capacity_kw:localSettings.charger_capacity_kw,
                 time_step_minutes: localSettings.time_resolution,
+                solver_time_limit_seconds:localSettings.solver_time_limit_seconds,
                 buses: buildSolverInputs(projectData,localSettings,{buses:activeBuses,hours:24}).buses,
                 pv_config: pvConfig,
                 bess_config: bessConfig,
@@ -926,7 +960,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     const recordValidation = (result, request = null, origin = 'backend', transportError = null) => {
       setValidationState({ key, result, diagnostic:validationDiagnostic(context, result, request, origin, transportError) });
     };
-    const policyIssues = [...socPolicyIssues(localSettings), ...endConditionIssues(localSettings, simulationMode), ...chargingCurveIssues(localSettings),
+    const policyIssues = [...solverTimeLimitIssues(localSettings), ...socPolicyIssues(localSettings), ...endConditionIssues(localSettings, simulationMode), ...chargingCurveIssues(localSettings),
       ...(simulationMode === 'daily_cyclic' ? dailyConfigurationIssues({...projectData,buses:busesToValidate},localSettings,scenario) : [])];
     if (policyIssues.length) {
       recordValidation({status:'invalid',issues:policyIssues}, null, 'frontend');
@@ -1372,20 +1406,18 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                     />
                   </div>
 
-                  <div className="form-group mb-0">
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="form-label text-[10px] uppercase font-bold text-muted mb-0">Solver Time Limit (s)</label>
-                      <InfoTooltip title="Timeout" text="Hard limit for the solver duration on the server side." />
-                    </div>
-                    <input 
-                      className="form-input text-xs h-9" 
-                      type="number" 
-                      value={projectData.meta.time_limit || 60} 
-                      onChange={(e) => setProjectData(prev => ({ ...prev, meta: { ...prev.meta, time_limit: Number(e.target.value) } }))}
-                    />
-                  </div>
-                  
-                  <div />
+              <div className="form-group mb-0 col-span-2">
+                <label className="form-label" htmlFor="solver-time-limit">Maximum solver time per pass (seconds)</label>
+                <input id="solver-time-limit" className="form-input" type="number" min="1" max="86400" step="1"
+                  value={localSettings.solver_time_limit_seconds} onChange={event=>{
+                    const value=event.target.value==='' ? '' : Number(event.target.value);
+                    setLocalSettings(previous=>({...previous,solver_time_limit_seconds:value}));
+                    if (!solverTimeLimitIssues({solver_time_limit_seconds:value}).length) setProjectData(previous=>({...previous,
+                      constraints:{...previous.constraints,solver_time_limit_seconds:value}}));
+                  }} aria-describedby="solver-time-limit-help" />
+                <p id="solver-time-limit-help" className="text-sm text-muted mt-2">Default: 180 s. Range: 1–86400 s. Applies to each solver pass, day and scenario. Soft SoC may require two passes. Model preparation, data loading and diagnostics add to total runtime; this is not an overall run deadline. Saved automatically.</p>
+              </div>
+
                 </div>
               )}
             </div>
@@ -2009,6 +2041,13 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                     <option value={48}>48 Hours</option>
                     <option value={72}>72 Hours</option>
                   </CustomSelect>
+                  {simulationMode === 'daily_cyclic' && <div className="mt-4">
+                    <label className="form-label" htmlFor="daily-workers">Concurrent day jobs</label>
+                    <CustomSelect id="daily-workers" value={longTermConfig.dailyWorkers || 2} onChange={event=>setLongTermConfig(previous=>({...previous,dailyWorkers:Number(event.target.value)}))}>
+                      {[1,2,3,4].map(value=><option key={value} value={value}>{value}{value===1 ? ' — serial' : value===2 ? ' — default' : ''}</option>)}
+                    </CustomSelect>
+                    <p className="text-sm text-muted mt-2">After a verified seed day. Host capacity may reduce this setting; unsafe midnight boundaries use serial execution. This does not shorten an individual solver timeout.</p>
+                  </div>}
                 </div>
               </div>
             )}
@@ -2101,6 +2140,13 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             </div>
           )}
           <OptimizationProgress state={liveProgress} />
+          {simulationMode==='daily_cyclic' && Object.keys(dayStatuses).length>0 && <div className="optimization-live-panel" style={{maxWidth:760,width:'100%'}}>
+            <strong>{Object.values(dayStatuses).filter(value=>value==='completed').length} of {Object.keys(dayStatuses).length} days completed · {Object.values(dayStatuses).filter(value=>['running','cancelling'].includes(value)).length} day jobs active</strong>
+            <div style={{maxHeight:250,overflow:'auto'}}><table className="data-table"><thead><tr><th>Date</th><th>Status</th></tr></thead><tbody>
+              {Object.entries(dayStatuses).sort(([a],[b])=>a.localeCompare(b)).map(([date,value])=><tr key={date}><td>{date}</td><td>{value}</td></tr>)}
+            </tbody></table></div>
+            {Object.entries(dayLiveProgress).filter(([date])=>['queued','running','cancelling'].includes(dayStatuses[date])).sort(([a],[b])=>a.localeCompare(b)).map(([date,state])=><div key={date}><h3>{date}</h3><OptimizationProgress state={state} /></div>)}
+          </div>}
         </div>
       )}
 
