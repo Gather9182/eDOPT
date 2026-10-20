@@ -1,6 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {dailyProgressSummary,dailyPhaseLabel,excludedDailyDates,dailyStatusLabel,contiguousDayWindow} from '../src/utils/dailyProgress.js';
+import {dailyProgressSummary,dailyPhaseLabel,excludedDailyDates,dailyStatusLabel,contiguousDayWindow,workerCapacityExplanation} from '../src/utils/dailyProgress.js';
+
+test('capacity explanation distinguishes measured RAM, startup pool and pending refresh',()=>{
+ const report={daily_workers:1,refresh_deferred:true,resources:{available_memory_bytes:16*1024**3,cpu_count:16,
+   memory_per_worker_bytes:2*1024**3,memory_worker_limit:8,environment_worker_limit:4,daily_workers:4,limiting_factors:[],checked_at:'2026-10-20T12:00:00Z'}};
+ const text=workerCapacityExplanation(report).join(' ');
+ assert.match(text,/16.0 GiB available RAM/);assert.match(text,/16 logical CPU/);
+ assert.match(text,/existing pool of 1/);assert.match(text,/Current resources permit 4 jobs/);
+ assert.match(workerCapacityExplanation(null).join(' '),/unavailable/);
+ assert.match(workerCapacityExplanation({...report,resources:{...report.resources,available_memory_bytes:null,detection_error:'Detection failed',limiting_factors:['detection_failed']}}).join(' '),/RAM unknown.*Detection failed/);
+});
+
+test('intentional DST exclusions are counted separately from failed days',()=>{
+ const summary=dailyProgressSummary({'2025-10-25':'completed','2025-10-26':'skipped','2025-10-27':'running'});
+ assert.equal(summary.skipped,1);assert.equal(summary.failed,0);assert.equal(summary.pending,0);
+ assert.equal(dailyStatusLabel('skipped'),'Skipped (DST)');
+ assert.deepEqual(excludedDailyDates({day_records:[{date:'2025-10-26',status:'skipped'}]}),[{date:'2025-10-26',status:'skipped'}]);
+});
 
 test('overview prioritizes active dates and counts real completed days separately from pending work',()=>{
   const summary=dailyProgressSummary({'2026-10-01':'completed','2026-10-02':'not_calculated','2026-10-03':'running','2026-10-04':'queued','2026-10-05':'cancelling','2026-10-06':'failed'});

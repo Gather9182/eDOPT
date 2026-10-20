@@ -2,7 +2,7 @@ import datetime as dt
 import unittest
 
 from app.models import OptimizationInputs,OpportunityVisit
-from app.services.price_service import historical_day_grid,historical_calendar,map_strict_historical_day,PriceService
+from app.services.price_service import historical_day_grid,historical_calendar,historical_calendar_exclusions,map_strict_historical_day,PriceService
 from app.services.solver import run_milp_solver
 from test_charging import run_offline,site
 from test_cyclic_soc import cycle_inputs,cycle_bus
@@ -43,6 +43,16 @@ class HistoricalDailyTests(unittest.TestCase):
         with self.assertRaises(ValueError): historical_calendar('2026-02-03','2026-02-02')
         with self.assertRaises(ValueError): historical_day_grid('2026-02-02',7)
         self.assertEqual(historical_calendar('2026-02-02','2026-02-03'),['2026-02-02','2026-02-03'])
+
+    def test_annual_calendar_includes_dst_dates_without_blocking_the_run(self):
+        dates=historical_calendar('2025-10-20','2026-10-20')
+        self.assertEqual(len(dates),366)  # Both endpoints are included.
+        self.assertIn('2025-10-26',dates)
+        self.assertIn('2026-03-29',dates)
+        exclusions=historical_calendar_exclusions(dates)
+        self.assertEqual([(row['date'],row['local_day_hours']) for row in exclusions],[('2025-10-26',25),('2026-03-29',23)])
+        self.assertTrue(all(row['code']=='DST_DAY_SKIPPED' for row in exclusions))
+        with self.assertRaises(ValueError): historical_calendar('2026-01-01','2026-12-31',7)
 
     def test_strict_service_does_not_reuse_legacy_fallback_mapper(self):
         class Provider:

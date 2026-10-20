@@ -1,15 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {arrivalComparison} from '../utils/arrivalComparison';
 import { 
   Download, Table as TableIcon, Share2, Archive,
   AlertCircle, ChevronRight, Loader2, Sparkles, CheckCircle2, Palette
 } from 'lucide-react';
 import { getItem } from '../utils/db';
-import { exportExcel } from '../services/api';
+import { API_BASE } from '../services/api';
 import { BRANDING } from '../components/PrintReportTemplate';
-import { resultAnalysisFiles } from '../utils/resultAnalysisExport';
+import { backgroundExport } from '../utils/backgroundExport';
 import DailyCyclicSummary from '../components/DailyCyclicSummary';
-import { diagnosticZip } from '../utils/diagnosticExport';
 
 const getFormattedFilename = (results, ext) => {
   if (!results) return `eDOPT_baseline-Shortterm_010126.${ext}`;
@@ -53,6 +52,9 @@ const Export = ({ projectData }) => {
   const [downloadSuccess, setDownloadSuccess] = useState(null);
   const [zipError,setZipError] = useState('');
   const [zipNotice,setZipNotice] = useState('');
+  const [exportProgress,setExportProgress] = useState(null);
+  const exportController=useRef(null);
+  useEffect(()=>()=>exportController.current?.abort(),[]);
 
   useEffect(() => {
     const loadResults = async () => {
@@ -74,142 +76,38 @@ const Export = ({ projectData }) => {
     setTimeout(() => setDownloadSuccess(null), 3000);
   };
 
-  const handleDownloadExcel = async () => {
-    if (!results) return;
-    setDownloading('excel');
+  const handleBackgroundDownload = async format => {
+    if (!results || exportController.current) return;
+    const controller=new AbortController();
+    exportController.current=controller;
+    setDownloading(format);setZipError('');setZipNotice('');
+    setExportProgress({message:'Starting background export'});
     try {
-      // Append co2 factor dynamically from projectData config if not stored in metadata
-      const payload = JSON.parse(JSON.stringify(results));
-      if (!payload.run_metadata) payload.run_metadata = {};
-      if (!payload.run_metadata.inputs) payload.run_metadata.inputs = {};
-      payload.run_metadata.inputs.co2_emission_factor ??= results.run_metadata?.audit_context?.project?.meta?.co2_emission_factor ?? projectData.meta?.co2_emission_factor ?? 400.0;
-      
-      const blob = await exportExcel(payload);
-      
-      const url = window.URL.createObjectURL(new Blob([blob]));
-      const link = document.createElement('a');
-      link.href = url;
-      
-      link.setAttribute('download', getFormattedFilename(results, 'xlsx'));
-      document.body.appendChild(link);
-      link.click();
-      link.parentNode.removeChild(link);
-      triggerSuccessAlert('excel');
-    } catch (err) {
-      console.error("Excel download failed:", err);
-      alert("Failed to export Excel file. Please ensure the backend server is running.");
+      const result=await backgroundExport({format,project:projectData,apiBase:API_BASE,now:new Date().toISOString(),
+        environment:{browser:navigator.userAgent,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,
+          language:navigator.language,frontend_mode:import.meta.env.MODE}},
+        {identity:results.run_metadata?.run_id || results.run_metadata?.timestamp || null,
+          getItem,onProgress:setExportProgress,signal:controller.signal});
+      const url=URL.createObjectURL(result.blob);
+      const link=document.createElement('a');
+      link.href=url;link.download=getFormattedFilename(results,format==='analysis' ? 'analysis.zip' : format==='excel' ? 'xlsx' : format);
+      document.body.appendChild(link);link.click();link.remove();
+      setTimeout(()=>URL.revokeObjectURL(url),60000);
+      if(format==='analysis') setZipNotice(result.missingCount
+        ? `Analysis ZIP exported with ${result.missingCount} missing-information notes. See README.txt and manifest.json.`
+        : `Analysis ZIP exported: ${result.fileCount} files with results, original run inputs, settings and source data.`);
+      triggerSuccessAlert(format);
+    } catch(error) {
+      if(error.name==='AbortError') setZipNotice('Export cancelled. Saved results are unchanged.');
+      else setZipError(`Export failed: ${error.message}`);
     } finally {
-      setDownloading(null);
+      exportController.current=null;setDownloading(null);setExportProgress(null);
     }
   };
-
-  const handleDownloadCSV = () => {
-    if (!results) return;
-    setDownloading('csv');
-    try {
-      const prices = results.electricity_prices || [];
-      const mPrices = results.market_prices || [];
-      const load = results.aggregated_load_profile || [];
-      const baseLoad = results.baseline_aggregated_load_profile || [];
-      const gridImport = results.grid_import_profile || [];
-      const pvYield = results.pv_yield_profile || [];
-      const bessSoc = results.bess_soc_profile || [];
-      const cellTemp = results.bess_cell_temperature_profile_c || [];
-      const ambientTemp = results.ambient_temperature_profile_c || [];
-
-      // Generate Headers
-      let headers = ['Period_Index', 'Price_EUR_MWh', 'Optimized_Grid_Load_kW'];
-      if (mPrices.length > 0) headers.push('Market_Price_EUR_MWh');
-      if (baseLoad.length > 0) headers.push('Baseline_Load_kW');
-      if (gridImport.length > 0) headers.push('Net_Grid_Import_kW');
-      if (pvYield.length > 0) headers.push('PV_Generation_kW');
-      if (bessSoc.length > 0) headers.push('BESS_SoC_kWh');
-      if (ambientTemp.length > 0) headers.push('Ambient_Temp_C');
-      if (cellTemp.length > 0) headers.push('BESS_Cell_Temp_C');
-
-      const csvRows = [headers.join(',')];
-
-      for (let t = 0; t < prices.length; t++) {
-        const row = [t + 1, prices[t], load[t] || 0];
-        if (mPrices.length > 0) row.push(mPrices[t] || 0);
-        if (baseLoad.length > 0) row.push(baseLoad[t] || 0);
-        if (gridImport.length > 0) row.push(gridImport[t] || 0);
-        if (pvYield.length > 0) row.push(pvYield[t] || 0);
-        if (bessSoc.length > 0) row.push(bessSoc[t] || 0);
-        if (ambientTemp.length > 0) row.push(ambientTemp[t] || 0);
-        if (cellTemp.length > 0) row.push(cellTemp[t] || 0);
-        
-        csvRows.push(row.join(','));
-      }
-
-      const csvContent = "data:text/csv;charset=utf-8," + csvRows.join("\n");
-      const encodedUri = encodeURI(csvContent);
-      const link = document.createElement("a");
-      
-      link.setAttribute("href", encodedUri);
-      link.setAttribute("download", getFormattedFilename(results, 'csv'));
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      triggerSuccessAlert('csv');
-    } catch (err) {
-      console.error("CSV download failed:", err);
-      alert("Failed to export CSV timeseries.");
-    } finally {
-      setDownloading(null);
-    }
-  };
-
-  const handleDownloadJSON = () => {
-    if (!results) return;
-    setDownloading('json');
-    try {
-      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(results, null, 2));
-      const downloadAnchor = document.createElement('a');
-      downloadAnchor.setAttribute("href", dataStr);
-      
-      downloadAnchor.setAttribute("download", getFormattedFilename(results, 'json'));
-      document.body.appendChild(downloadAnchor);
-      downloadAnchor.click();
-      document.body.removeChild(downloadAnchor);
-      triggerSuccessAlert('json');
-    } catch (err) {
-      console.error("JSON download failed:", err);
-      alert("Failed to export JSON.");
-    } finally {
-      setDownloading(null);
-    }
-  };
-
-  const handleDownloadAnalysis = async () => {
-    if (!results || downloading) return;
-    setDownloading('analysis');
-    setZipError('');
-    setZipNotice('');
-    try {
-      await new Promise(resolve => setTimeout(resolve,0));
-      const now = new Date();
-      const {files,manifest} = await resultAnalysisFiles(results,projectData,getItem,
-        {browser:navigator.userAgent,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,
-          language:navigator.language,frontend_mode:import.meta.env.MODE},now);
-      const url = URL.createObjectURL(diagnosticZip(files,now));
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = getFormattedFilename(results,'analysis.zip');
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      setTimeout(() => URL.revokeObjectURL(url),1000);
-      setZipNotice(manifest.missing_information.length
-        ? `Analysis ZIP exported with ${manifest.missing_information.length} missing-information ${manifest.missing_information.length === 1 ? 'note' : 'notes'}. See README.txt and manifest.json for details.`
-        : `Analysis ZIP exported: ${files.length} files with results, original run inputs, settings and source data.`);
-      triggerSuccessAlert('analysis');
-    } catch (error) {
-      setZipError(`Analysis export failed: ${error.message}`);
-    } finally { setDownloading(null); }
-  };
-
-
+  const handleDownloadExcel=()=>handleBackgroundDownload('excel');
+  const handleDownloadCSV=()=>handleBackgroundDownload('csv');
+  const handleDownloadJSON=()=>handleBackgroundDownload('json');
+  const handleDownloadAnalysis=()=>handleBackgroundDownload('analysis');
 
   if (loading) {
     return (
@@ -427,6 +325,12 @@ const Export = ({ projectData }) => {
                   </>
                 )}
               </button>
+              {isDownloadingThis && <div className="mt-3 text-sm text-secondary" role="status" aria-live="polite">
+                <p>{exportProgress?.message || 'Working in background'}</p>
+                {exportProgress?.total>0 && <p>{exportProgress.completed} / {exportProgress.total} {exportProgress.phase==='archive' ? 'files packed' : 'items processed'}</p>}
+                <p className="text-xs mt-2">You can continue using the page. Export runs in the background.</p>
+                <button type="button" className="btn btn-outline btn-sm mt-2" onClick={()=>exportController.current?.abort()}>Cancel export</button>
+              </div>}
             </div>
           );
         })}

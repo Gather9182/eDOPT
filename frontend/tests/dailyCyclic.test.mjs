@@ -41,6 +41,48 @@ function solved(request) {
 }
 const priceDay=(date,market=[100,200])=>({date,coverage:'complete',market_prices:market,timestamps:[`${date}T00:00:00+01:00`,`${date}T12:00:00+01:00`]});
 
+test('a full annual run skips only declared DST dates in serial and parallel execution and exports their reasons',async()=>{
+  const dates=Array.from({length:365},(_,i)=>new Date(Date.UTC(2025,0,1+i)).toISOString().slice(0,10));
+  const excludedDates=[{date:'2025-03-30',local_day_hours:23,code:'DST_DAY_SKIPPED',reason:'23-hour daylight-saving day'},
+    {date:'2025-10-26',local_day_hours:25,code:'DST_DAY_SKIPPED',reason:'25-hour daylight-saving day'}];
+  for (const concurrency of [1,4]) {
+    const input=fixture(),fetched=[],saved=[],statuses=[];
+    const run=await runDailyCyclic({...input,dates,excludedDates,concurrency,
+      fetchPrices:async date=>{fetched.push(date);return priceDay(date);},optimize:async request=>solved(request),
+      checkpoint:async row=>saved.push(row),onDayProgress:row=>statuses.push(row)});
+    assert.equal(run.finished,true);assert.equal(run.status,'partial');
+    assert.equal(fetched.length,363);assert.equal(new Set(saved.map(row=>row.date)).size,365);
+    assert.ok(excludedDates.every(day=>!fetched.includes(day.date)));
+    assert.deepEqual(run.records.filter(row=>row.status==='skipped').map(row=>row.date),excludedDates.map(row=>row.date));
+    assert.equal(run.records.at(-1).status,'completed');
+    assert.equal(statuses.filter(row=>row.status==='skipped').length,2);
+    const result=aggregateDailyRun(run);
+    assert.equal(result.total_days,363);assert.equal(result.requested_days,365);
+    assert.equal(result.skipped_dates.length,2);assert.equal(result.failed_attempts.length,0);
+    assert.ok(Math.abs(result.total_energy_mwh-363*.005)<1e-9);
+    assert.ok(Math.abs(result.total_cost_eur-363*1.05)<1e-8);
+    const {files}=await resultAnalysisFiles(result,input.project,async()=>null);
+    const status=JSON.parse(files.find(file=>file.name==='run/days/status.json').data);
+    assert.equal(status.dst_policy,'skip');assert.deepEqual(status.skipped_dates,excludedDates);
+    const csv=files.find(file=>file.name==='tables/daily_summary.csv').data;
+    assert.ok(csv.includes('DST_DAY_SKIPPED'));assert.ok(csv.includes('23-hour daylight-saving day'));
+  }
+});
+
+test('a skipped first date selects the next valid seed and an all-skipped range submits no solver jobs',async()=>{
+  const input=fixture(),dates=['2025-10-26','2025-10-27'];
+  const excludedDates=[{date:dates[0],code:'DST_DAY_SKIPPED',local_day_hours:25,reason:'25-hour daylight-saving day'}];
+  let calls=0;
+  const options={...input,dates,excludedDates,concurrency:4,fetchPrices:async date=>priceDay(date),
+    optimize:async request=>{calls++;return solved(request);},checkpoint:async()=>{}};
+  const run=await runDailyCyclic(options);
+  assert.equal(calls,1);assert.equal(run.execution.seed_date,dates[1]);
+  assert.deepEqual(run.records.map(row=>row.status),['skipped','completed']);
+  calls=0;
+  const skipped=await runDailyCyclic({...options,dates:[dates[0]]});
+  assert.equal(calls,0);assert.equal(skipped.finished,true);assert.equal(aggregateDailyRun(skipped),null);
+});
+
 test('selected solver budget is validated and shared by short, daily and flexible requests',()=>{
   const {project,settings,buses}=fixture();
   assert.equal(buildSolverInputs(project,settings,{buses}).solver_time_limit_seconds,180);
@@ -52,6 +94,66 @@ test('selected solver budget is validated and shared by short, daily and flexibl
     assert.equal(solverTimeLimitIssues({solver_time_limit_seconds:value}).length,1);
     assert.throws(()=>buildSolverInputs(project,{...settings,solver_time_limit_seconds:value},{buses}),/Solver time limit/);
   }
+});
+
+test('price retry runs after all dates, preserves successes and recovers with the same boundary and frozen settings',async()=>{
+ for (const concurrency of [1,4]) {
+  const input=fixture(),dates=['2026-02-02','2026-02-03','2026-02-04'];
+  const fetched=[],calls=new Map(),requests=[],phases=[];
+  const run=await runDailyCyclic({...input,concurrency,dates,fetchPrices:async date=>{
+    fetched.push(date);calls.set(date,(calls.get(date)||0)+1);
+    if(date===dates[1] && calls.get(date)===1) throw new Error('Incomplete historical prices');
+    return priceDay(date);
+  },optimize:async (request,context)=>{requests.push({request,context});return solved(request);},checkpoint:async()=>{},onExecution:phase=>phases.push(phase)});
+  assert.deepEqual(fetched,[...dates,dates[1]]);
+  assert.equal(run.status,'completed');assert.equal(run.execution.price_retry.recovered,1);
+  assert.equal(run.records[1].attempt_history[0].error.detail,'Incomplete historical prices');
+  assert.equal(run.records[1].retry_attempts,1);
+  assert.equal(requests.filter(row=>row.context.date===dates[0]).length,1);
+  assert.equal(requests.filter(row=>row.context.date===dates[2]).length,1);
+  assert.equal(requests.at(-1).context.day_index,1);
+  assert.equal(requests.at(-1).context.retry_attempt,1);
+  if (concurrency===4) assert.deepEqual(requests.at(-1).request.daily_connection_boundary,run.execution.boundary);
+  assert.ok(phases.some(phase=>phase.mode==='retry'));
+  const result=aggregateDailyRun(run);
+  assert.equal(result.total_days,3);assert.ok(Math.abs(result.total_cost_eur-3.15)<1e-9);
+  const {files}=await resultAnalysisFiles(result,input.project,async()=>null);
+  assert.ok(files.some(file=>file.name.endsWith('/attempt_history.json') && file.data.includes('Incomplete historical prices')));
+ }
+});
+
+test('persistent price gaps are retried once while solver failures and DST exclusions are not retried',async()=>{
+ const input=fixture(),dates=['2026-02-02','2026-02-03','2026-02-04','2026-02-05'],calls={};
+ const run=await runDailyCyclic({...input,dates,excludedDates:[{date:dates[3],reason:'DST',code:'DST_DAY_SKIPPED'}],
+  fetchPrices:async date=>{calls[date]=(calls[date]||0)+1;if(date===dates[1]) throw new Error('Missing prices');return priceDay(date);},
+  optimize:async (request,context)=>{if(context.date===dates[2]) throw new Error('Infeasible');return solved(request);},checkpoint:async()=>{}});
+ assert.deepEqual(calls,{[dates[0]]:1,[dates[1]]:2,[dates[2]]:1});
+ assert.equal(run.execution.price_retry.recovered,0);assert.equal(run.execution.price_retry.attempted,1);
+ assert.deepEqual(run.records.map(row=>row.status),['completed','failed','failed','skipped']);
+});
+
+test('cancelling a price retry retains successful days and does not start another retry',async()=>{
+ const input=fixture(),dates=['2026-02-02','2026-02-03','2026-02-04'],calls={};
+ const run=await runDailyCyclic({...input,dates,fetchPrices:async date=>{
+  calls[date]=(calls[date]||0)+1;
+  if(calls[date]===2) throw cancellationError();
+  if(date!==dates[0]) throw new Error('Missing prices');return priceDay(date);
+ },optimize:async request=>solved(request),checkpoint:async()=>{}});
+ assert.equal(run.finished,false);assert.equal(run.records[0].status,'completed');
+ assert.equal(run.records[1].retry_cancelled,true);assert.equal(calls[dates[2]],1);
+ assert.equal(run.execution.price_retry.cancelled,true);
+});
+
+test('a recovered price day cannot be inserted with a connector mismatch against an existing next day',async()=>{
+ const input=fixture(),dates=['2026-02-02','2026-02-03','2026-02-04'],calls={};
+ const run=await runDailyCyclic({...input,dates,fetchPrices:async date=>{
+  calls[date]=(calls[date]||0)+1;
+  if(date===dates[1] && calls[date]===1) throw new Error('Missing prices');return priceDay(date);
+ },optimize:async(request,context)=>context.retry_attempt ? {...solved(request),final_connections:{B:null}} : solved(request),checkpoint:async()=>{}});
+ assert.deepEqual(run.records.map(row=>row.status),['completed','failed','completed']);
+ assert.match(run.records[1].error.detail,/connector continuity/);
+ assert.equal(run.execution.price_retry.recovered,0);
+ assert.equal(run.records[2].result.final_connections.B,'D');
 });
 
 test('shared request keeps selected fleet, SoC settings, zero reserve and technical rules unchanged',()=>{
@@ -94,7 +196,7 @@ test('two days use actual daily prices, inherit states and produce verified aggr
 
 test('failure at day 2 retains day 1 and continues day 3 as an explicit independent segment',async()=>{
   const input=fixture(),saved=[];
-  const run=await runDailyCyclic({...input,dates:['2026-02-02','2026-02-03','2026-02-04'],fetchPrices:async date=>{
+  const run=await runDailyCyclic({...input,retryPriceFailures:false,dates:['2026-02-02','2026-02-03','2026-02-04'],fetchPrices:async date=>{
     if(date.endsWith('03')) throw new Error('Missing source prices');return priceDay(date);
   },optimize:async request=>solved(request),checkpoint:async record=>saved.push(record)});
   assert.equal(run.status,'partial');

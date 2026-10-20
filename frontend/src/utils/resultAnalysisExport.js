@@ -44,7 +44,8 @@ export async function archiveChunkRequest(inputs, attempt, runId, setItem, resul
   return record;
 }
 
-export async function resultAnalysisFiles(results, currentProject, getItem, environment = {}, now = new Date()) {
+export async function resultAnalysisFiles(results, currentProject, getItem, environment = {}, now = new Date(), onProgress=()=>{}) {
+  onProgress({phase:'snapshot',message:'Writing results and configuration snapshots'});
   if (!results || typeof results !== 'object') throw new Error('No saved optimization result is available.');
   // These are separately named snapshots. Current settings never replace run inputs.
   const metadata = results.run_metadata || {};
@@ -73,19 +74,22 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
     {name:'environment_at_export.json',data:json(environment)},
   ];
   if (results.long_term_mode === 'daily_cyclic') {
-    files.push({name:'run/days/status.json',data:json({status:results.run_status,scope:results.timetable_scope,execution:results.daily_execution,completed_dates:results.completed_dates,completed_day_indices:results.completed_day_indices,days:results.day_records,failed_attempts:results.failed_attempts || []})});
+    files.push({name:'run/days/status.json',data:json({status:results.run_status,scope:results.timetable_scope,execution:results.daily_execution,dst_policy:results.dst_policy,skipped_dates:results.skipped_dates || [],completed_dates:results.completed_dates,completed_day_indices:results.completed_day_indices,days:results.day_records,failed_attempts:results.failed_attempts || []})});
     for (const [index,day] of (results.daily_results || []).entries()) {
+      if(index%8===0) onProgress({phase:'daily',message:'Writing daily evidence',completed:index,total:results.daily_results.length});
       const prefix=`run/days/day_${String(index+1).padStart(5,'0')}`;
       files.push({name:`${prefix}/request.json`,data:json(day.request)},{name:`${prefix}/prices.json`,data:json(day.prices)},
+        {name:`${prefix}/attempt_history.json`,data:json(day.attempt_history || [])},
         {name:`${prefix}/result.json`,data:json(day.result)},{name:`${prefix}/date.json`,data:json({date:day.date,day_index:day.day_index})});
     }
     files.push({name:'tables/daily_summary.csv',data:objectCsv((results.day_records || []).map(day=>({date:day.date,status:day.status,
-      solver_status:day.solver_status,optimality_proven:day.optimality_proven,
+      solver_status:day.solver_status,optimality_proven:day.optimality_proven,exclusion_code:day.exclusion?.code,local_day_hours:day.exclusion?.local_day_hours,
       cost_eur:day.reconciliation?.cost_eur,grid_energy_kwh:day.reconciliation?.grid_energy_kwh,charger_energy_mwh:day.reconciliation?.charger_energy_mwh,error:day.error?.detail})),['date','status','cost_eur','grid_energy_kwh','charger_energy_mwh'])},
       {name:'tables/daily_soc_connections.csv',data:objectCsv(results.end_condition?.buses || [],['date','day_index','bus_id','initial_soc_kwh','final_soc_kwh','previous_final_soc_kwh','initial_connection','previous_final_connection','final_connection','compliant'])},
       {name:'tables/daily_prices.csv',data:objectCsv((results.daily_results || []).flatMap(day=>day.prices.timestamps.map((timestamp,t)=>({date:day.date,timestamp,market_price_eur_mwh:day.prices.market_prices[t],effective_price_eur_mwh:day.request.electricity_prices[t]}))),['date','timestamp','market_price_eur_mwh','effective_price_eur_mwh'])});
   }
   const requestArchive = [];
+  onProgress({phase:'sources',message:'Reading archived solver requests and source files'});
   for (const record of metadata.request_archive || []) {
     const descriptor = {...record};
     try {
@@ -127,6 +131,7 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
   if (!sources.some(source => source.scope === 'run' && source.status === 'included')) missing.push('The original timetable for this run is unavailable. A current-project source, if included, is identified separately and is not assumed to match the run.');
 
   const series = entries(results).filter(([key,values]) => key!=='completed_day_indices' && Array.isArray(values) && values.length && values.every(value => typeof value === 'number' || value === null));
+  onProgress({phase:'tables',message:'Writing detailed fleet and bus tables'});
   const calendarMinute = t => usableStep ? calendarDayIndex(results,Math.floor(t*step/1440))*1440+(t*step)%1440 : null;
   const maxPeriods = series.reduce((max,[,values]) => Math.max(max,values.length),0);
   files.push({name:'tables/fleet_timeseries.csv',data:csv((function* () {
@@ -163,6 +168,7 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
   }
   const diagnostics = list(results.bus_diagnostics).map(row => ({day_index:null,...row}));
   for (const [day,rows] of entries(results.diagnostics_by_day)) for (const row of list(rows)) diagnostics.push({day_index:calendarDayIndex(results,day),date:results.completed_dates?.[day],...row});
+  onProgress({phase:'tables',message:'Writing site, route and charging-session tables'});
   files.push({name:'tables/bus_diagnostics.csv',data:objectCsv(diagnostics,['day_index','id'])});
 
   const sites = inputs?.charging_sites || [];
@@ -268,10 +274,12 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
     'mappings_at_run.csv is empty when original mapping settings were not retained. Current mappings are still available in project_current.json.',
     'summary.csv contains saved headline values. reconciliation.json independently integrates saved grid power/prices; no current-project values enter these calculations.',
     '', 'LIMITATIONS',
+    ...(results.long_term_mode==='daily_cyclic' ? ['Daily Cyclic skips 23/25-hour daylight-saving dates in Europe/Vienna. These dates have no synthetic prices or schedules and do not contribute to totals. See run/days/status.json and daily_summary.csv. A partial date range is not a complete-year total or an annual extrapolation.'] : []),
     'This export does not rerun the solver or infer missing information. Old/pruned results cannot regain profiles or request snapshots that were never saved.',
     'Successful runs do not normally retain an LP/IIS model. Failed-run diagnostic ZIPs remain available on the Optimization page.',
     ...(missing.length ? missing : ['No missing-information warnings.']),
   ].join('\n');
+  onProgress({phase:'manifest',message:'Writing completeness manifest'});
   files.push({name:'README.txt',data:report},{name:'manifest.json',data:json(manifest)});
   return {files,manifest};
 }

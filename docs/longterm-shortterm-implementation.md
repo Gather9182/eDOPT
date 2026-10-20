@@ -13,7 +13,7 @@ In Optimization Engine den Modus **Long-Term / Daily Cyclic** wählen,
 technischen Eingaben und den Kalender; beim Start werden die historischen
 Preise für jeden Tag gesondert geprüft.
 
-Jeder Kalendertag wird als vollständiger 24-Stunden-Lauf berechnet. Derselbe
+Jeder reguläre Kalendertag wird als vollständiger 24-Stunden-Lauf berechnet. Derselbe
 konfigurierte Tagesfahrplan wird wiederholt; Wochenenden und Feiertage erhalten
 keinen anderen Fahrplan. Es handelt sich um tägliche Optimierungen und nicht
 um ein gemeinsames Mehrtagesoptimum.
@@ -35,8 +35,17 @@ Kosten und Energie werden vor dem nächsten Tag geprüft.
   UTC-Quellintervalle, lokale Zeitstempel, Markt- und Effektivpreise.
 - Lücken, Überlappungen, doppelte oder ungültige Preise werden abgelehnt.
   Echte Null- und Negativpreise bleiben erhalten. Es gibt keinen Preisersatz.
-- Zeitzone ist Europe/Vienna. Tage mit 23 oder 25 Stunden werden vorab mit
-  verständlicher Fehlermeldung abgelehnt. Keine künstliche 24h-Zuordnung.
+- Zeitzone ist Europe/Vienna. Tage mit 23 oder 25 Stunden blockieren den
+  Kalender und Run Check nicht mehr: Sie erhalten `skipped` / `Skipped (DST)`
+  und werden ohne Preisabruf oder Solve ausgelassen. Keine künstliche 24h-Zuordnung.
+  Ergebnisse, Kalender und Analyse-ZIP zeigen Datum, Grund und tatsächliche
+  Tagesdauer. Alle Kennzahlen schließen diese Tage aus; es erfolgt keine
+  Hochrechnung auf ein vollständiges Jahr. Start- und Enddatum zählen beide mit.
+  Beispiel 20.10.2025–20.10.2026: 366 angefragte Tage, zwei DST-Ausnahmen
+  (26.10.2025: 25 Stunden; 29.03.2026: 23 Stunden), bis zu 364 Ergebnisse.
+  Im gekoppelten seriellen Modus beginnt nach der Lücke ein unabhängiger
+  Abschnitt mit konfigurierten Anfangswerten; kein Zustandsübergang über die
+  ausgelassene Zeit wird behauptet.
 - Zunächst nur Baseline. PV/BESS und optionale Ladeaufenthalte über Mitternacht
   werden in diesem Modus ausdrücklich abgelehnt.
 - Der bestehende flexible Modus behält 24/48/72h und seinen bisherigen
@@ -44,6 +53,25 @@ Kosten und Energie werden vor dem nächsten Tag geprüft.
   gekennzeichnet. Für den belegten historischen Tagesvergleich Daily Cyclic wählen.
 
 ## Speicherung, Anzeige und Export
+
+### Einmaliger Retry für Preisdatenfehler
+
+Die standardmäßig aktivierte Checkbox **Retry failed historical-price days
+after all dates** startet nach dem ersten vollständigen Datumsdurchlauf einen
+zusätzlichen seriellen Versuch für Tage, die vor Erstellung eines Solverrequests
+gescheitert sind. Erfolgreiche Tage, Solverfehler und DST-Ausschlüsse werden nicht
+erneut berechnet. Pro betroffenem Datum gibt es höchstens einen weiteren Abruf
+mit den eingefrorenen Einstellungen. Weiterhin unvollständige Preise bleiben
+Fehler; es gibt keinen Preisersatz.
+
+Ein wiederhergestellter Tag muss die ursprünglichen täglichen SoC-Ziele,
+gegebenenfalls die festen Parallel-Mitternachtsgrenzen sowie Anschlüsse und SoC
+zu beiden bereits vorhandenen Nachbartagen erfüllen. Erfolgreiche Nachbartage
+werden nicht verändert. Ein Abbruch stoppt weitere Retry-Versuche und behält
+die schon vorhandenen Ergebnisse. Results und ZIP dokumentieren Retry-Zähler,
+ursprüngliche Fehlversuche (`attempt_history`) und neue Ergebnisse. Diese
+automatische Phase gilt für neue Läufe; sie startet keine nachträgliche
+Berechnung beim bloßen Öffnen älterer gespeicherter Ergebnisse.
 
 Jeder erfolgreiche Tag wird vor dem nächsten Solve in IndexedDB gespeichert,
 einschließlich Request, Preisen und Ergebnis. Bei einem späteren Fehler bleiben
@@ -63,9 +91,14 @@ Nullkosten bei nicht verfügbaren Referenzen korrigiert.
 
 ## Prüfung
 
-Automatisierte Tests decken Preisabdeckung, DST-Ablehnung, Konfigurationserhalt,
+Automatisierte Tests decken Preisabdeckung, DST-Ausschlüsse, Konfigurationserhalt,
 Short-Term-/Daily-Parität, Tagesübergänge, Kostenabgleich, Export und Fehler an
 Tag 2 ab. Zusätzlich wurde der vollständige Job-API-Pfad mit echten MILP-Solves,
 zwei Standorten, Ladekurve und Sperrzeiten geprüft. Dafür wurden kontrollierte
 historische Preisdatensätze verwendet; dies ist kein Verfügbarkeitsnachweis des
 externen aWATTar-Dienstes für einen beliebigen Zeitraum.
+
+Zusätzlich werden vollständige 365-Tage-Orchestrierungsläufe mit kontrollierten
+Solver-/Preisantworten seriell und mit vier Workern geprüft: genau 363
+Ergebnistage, zwei getrennt markierte DST-Ausnahmen, korrekte Summen und
+Exportbelege. Dies ist kein Jahreslauf mit echten MILP-Solves oder externen Preisen.

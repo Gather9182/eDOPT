@@ -6,6 +6,7 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
@@ -186,14 +187,31 @@ def available_worker_memory():
     return os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
 
 
-def daily_worker_capacity():
-    """Host ceiling up to four; the UI defaults to requesting two workers."""
+def daily_worker_resources():
+    """Explain the conservative host estimate using this backend's environment."""
+    per_worker=2*1024**3
+    report=dict(checked_at=datetime.now(timezone.utc).isoformat(),memory_per_worker_bytes=per_worker,
+                memory_policy='Conservative estimate, not measured model memory usage.',
+                environment_limit_raw=os.environ.get('EDOPT_DAILY_WORKERS'),cpu_count=os.cpu_count() or 1)
     try:
         requested = max(1,min(4,int(os.environ.get('EDOPT_DAILY_WORKERS','4'))))
         available = available_worker_memory()
-        return max(1,min(requested,os.cpu_count() or 1,int(available//(2*1024**3))))
+        memory_limit=max(1,int(available//per_worker))
+        workers=max(1,min(requested,report['cpu_count'],memory_limit))
+        reasons=[]
+        if memory_limit<4: reasons.append('available_memory')
+        if report['cpu_count']<4: reasons.append('cpu_count')
+        if requested<4: reasons.append('environment_limit')
+        return {**report,'daily_workers':workers,'available_memory_bytes':available,'memory_worker_limit':memory_limit,
+                'environment_worker_limit':requested,'limiting_factors':reasons,'detection_error':None}
     except (ValueError,OSError,AttributeError):
-        return 1
+        return {**report,'daily_workers':1,'available_memory_bytes':None,'memory_worker_limit':None,
+                'environment_worker_limit':None,'limiting_factors':['detection_failed'],
+                'detection_error':'Resource detection failed or EDOPT_DAILY_WORKERS is not an integer. Using one worker.'}
+
+
+def daily_worker_capacity():
+    return daily_worker_resources()['daily_workers']
 
 
 class OptimizationJobs:
@@ -203,11 +221,26 @@ class OptimizationJobs:
         self.jobs = {}
         self.executor = ThreadPoolExecutor(max_workers=1,thread_name_prefix='edopt-optimizer')
         self.daily_workers = daily_worker_capacity() if daily_workers is None else max(1,min(4,daily_workers))
+        self.fixed_daily_workers = daily_workers is not None
+        self.startup_resources = daily_worker_resources()
         self.daily_executor = ThreadPoolExecutor(max_workers=self.daily_workers,thread_name_prefix='edopt-daily')
         self.slots = BoundedSemaphore(self.daily_workers)
 
     def capabilities(self):
-        return dict(daily_workers=self.daily_workers,daily_queue_capacity=8,cbc_threads_per_daily_job=1)
+        with self.lock:
+            resources=daily_worker_resources()
+            busy=any(job.data['status'] in ('queued','running','cancelling') for job in self.jobs.values())
+            target=resources['daily_workers']
+            if not busy and not self.fixed_daily_workers and target!=self.daily_workers:
+                old=self.daily_executor
+                self.daily_workers=target
+                self.daily_executor=ThreadPoolExecutor(max_workers=target,thread_name_prefix='edopt-daily')
+                self.slots=BoundedSemaphore(target)
+                old.shutdown(wait=False)
+            return dict(daily_workers=self.daily_workers,daily_queue_capacity=8,cbc_threads_per_daily_job=1,
+                        resources=resources,startup_resources=self.startup_resources,
+                        refresh_deferred=busy and target!=self.daily_workers,
+                        capacity_policy='fixed_override' if self.fixed_daily_workers else 'refresh_when_idle')
 
     def submit(self, inputs):
         with self.lock:
@@ -229,8 +262,9 @@ class OptimizationJobs:
     def _run(self, progress, inputs):
         token = current_progress.set(progress)
         acquired = False
+        slots = self.slots
         try:
-            while not self.slots.acquire(timeout=.1):
+            while not slots.acquire(timeout=.1):
                 progress.check_cancelled()
             acquired = True
             progress.check_cancelled()
@@ -253,7 +287,7 @@ class OptimizationJobs:
                 progress.update('failed','Optimization finished with an error. Review the diagnostic report.',status='failed')
         finally:
             if acquired:
-                self.slots.release()
+                slots.release()
             current_progress.reset(token)
 
     def shutdown(self):

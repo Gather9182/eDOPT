@@ -1612,6 +1612,8 @@ input[type="range"]::-webkit-slider-thumb:hover {
 .daily-run-status.is-running, .daily-run-status.is-queued { background: rgba(0, 82, 255, 0.09); color: var(--primary); }
 .daily-run-status.is-completed { background: var(--badge-success-bg); color: var(--badge-success-text); }
 .daily-run-status.is-failed { background: var(--badge-error-bg); color: var(--badge-error-text); }
+.daily-run-status.is-skipped, .excluded-daily-date.is-skipped, .excluded-daily-row.is-skipped,
+.calendar-day-excluded.is-skipped:disabled { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
 .daily-run-status.is-cancelling { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
 @media (max-width: 520px) { .daily-run-progress { padding: 14px; } .daily-run-metrics { gap: 6px; } .daily-run-metrics > div { padding: 9px; } .daily-run-metrics strong { font-size: 18px; } }
 

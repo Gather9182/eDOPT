@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from .models import OptimizationInputs, OptimizationResult
 from .services.optimization import run_optimization
-from .services.price_service import PriceService, AWattarProvider, historical_calendar
+from .services.price_service import PriceService, AWattarProvider, historical_calendar, historical_calendar_exclusions
 from .utils.excel_processor import process_umlauf_excel, scan_umlauf_excel
 from .services.charging_sites import validate_sites
 from .services.feasibility import energy_feasibility_issues
@@ -74,7 +74,9 @@ async def health_check():
 @app.get('/api/prices/historical-calendar')
 def get_historical_calendar(start_date: str,end_date: str,resolution_min: int=15):
     try:
-        return {'dates':historical_calendar(start_date,end_date,resolution_min),'timezone':'Europe/Vienna'}
+        dates=historical_calendar(start_date,end_date,resolution_min)
+        return {'dates':dates,'timezone':'Europe/Vienna','dst_policy':'skip',
+                'excluded_dates':historical_calendar_exclusions(dates)}
     except ValueError as error:
         raise HTTPException(status_code=400,detail=str(error))
 

@@ -198,20 +198,27 @@ export async function diagnosticFiles(diagnostic, logs, getItem, exportedAt = ne
 
 // ZIP "store" records: no dependency or backend round trip is needed for export.
 // CRCs make corruption detectable by standard ZIP readers.
-export function diagnosticZip(files, now = new Date()) {
+const crcTable=Uint32Array.from({length:256},(_,value)=>{
+  let crc=value;
+  for(let bit=0;bit<8;bit++) crc=(crc>>>1)^((crc&1) ? 0xedb88320 : 0);
+  return crc>>>0;
+});
+
+export function diagnosticZip(files, now = new Date(), onProgress=()=>{}) {
+  if(files.length>65535) throw new Error('The package exceeds the ZIP limit of 65,535 files.');
   const encoder = new TextEncoder();
   const parts = [], directory = [];
   let offset = 0;
   const time = (now.getHours()<<11) | (now.getMinutes()<<5) | (now.getSeconds()>>1);
   const date = ((Math.max(1980, now.getFullYear())-1980)<<9) | ((now.getMonth()+1)<<5) | now.getDate();
+  let processed=0;
   for (const file of files) {
     const name = encoder.encode(file.name);
     const data = typeof file.data === 'string' ? encoder.encode(file.data) : file.data;
     if (data.length + offset > 0xffffffff) throw new Error('The diagnostic package exceeds the ZIP size limit of 4 GB.');
     let crc = 0xffffffff;
     for (const byte of data) {
-      crc ^= byte;
-      for (let bit=0; bit<8; bit++) crc = (crc>>>1) ^ ((crc&1) ? 0xedb88320 : 0);
+      crc = (crc>>>8)^crcTable[(crc^byte)&255];
     }
     crc = (crc ^ 0xffffffff) >>> 0;
     const local = new Uint8Array(30), l = new DataView(local.buffer);
@@ -225,6 +232,8 @@ export function diagnosticZip(files, now = new Date()) {
     c.setUint32(20,data.length,true); c.setUint32(24,data.length,true); c.setUint16(28,name.length,true); c.setUint32(42,offset,true);
     directory.push(central,name);
     offset += local.length + name.length + data.length;
+    processed++;
+    if(processed%8===0 || processed===files.length) onProgress({completed:processed,total:files.length,bytes:offset});
   }
   const directorySize = directory.reduce((total, part) => total+part.length,0);
   const end = new Uint8Array(22), e = new DataView(end.buffer);

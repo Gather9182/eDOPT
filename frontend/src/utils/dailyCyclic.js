@@ -17,6 +17,18 @@ export function dailyRecordError(record) {
 
 export const dailyResultsReady = run => Boolean(run.finished || run.status==='completed') && run.records.some(record=>record.status==='completed');
 
+function checkDailyDate(date,excludedDates) {
+  const excluded=excludedDates.find(day=>day.date===date);
+  if (excluded) {
+    const error=new Error(excluded.reason);
+    error.code='DST_DAY_SKIPPED';
+    error.exclusion=excluded;
+    throw error;
+  }
+}
+
+const dayFailureStatus=error=>error.code==='OPTIMIZATION_CANCELLED' ? 'cancelled' : error.code==='DST_DAY_SKIPPED' ? 'skipped' : 'failed';
+
 function blocked(site) {
   return (site.no_switch_windows || []).some(window => {
     const minutes=value=>value.split(':').reduce((hours,part)=>hours*60+Number(part),0);
@@ -58,7 +70,7 @@ export function verifyDailyResult(request,result,previous=null,configuredInitial
     }
     if (previous) for (const site of request.charging_sites || []) {
       if (bus.site_presence?.[site.id]?.[0] && !bus.site_arrivals?.[site.id]?.[0] && blocked(site)
-          && (connections?.[0]===site)!==(previous.final_connections?.[bus.id]===site)) throw new Error(`Route ${bus.id}: inter-day connector continuity failed at ${site.id}.`);
+          && (connections?.[0]===site.id)!==(previous.final_connections?.[bus.id]===site.id)) throw new Error(`Route ${bus.id}: inter-day connector continuity failed at ${site.id}.`);
     }
     if (inherited != null) for (const site of request.charging_sites || []) {
       const presence=bus.site_presence?.[site.id]?.[0];
@@ -73,7 +85,7 @@ export function verifyDailyResult(request,result,previous=null,configuredInitial
   return {cost_eur:cost,charger_energy_mwh:energy,grid_energy_kwh:sum(result.grid_import_profile)*dt,proofs};
 }
 
-async function runSerialDailyCyclic({project,settings,buses,dates,fetchPrices,optimize,checkpoint,notify=()=>{},onDayProgress=()=>{},signal}) {
+async function runSerialDailyCyclic({project,settings,buses,dates,fetchPrices,optimize,checkpoint,notify=()=>{},onDayProgress=()=>{},signal,excludedDates=[]}) {
   const records=[];
   let previous=null,initialConnections,initialEnergies={};
   let firstError=null,newSegment=false;
@@ -82,6 +94,7 @@ async function runSerialDailyCyclic({project,settings,buses,dates,fetchPrices,op
     let request=null,prices=null,result=null;
     try {
       checkOptimizationCancelled(signal);
+      checkDailyDate(date,excludedDates);
       onDayProgress({date,day_index:index,status:'running'});
       notify(`Daily Cyclic: day ${index+1}/${dates.length} (${date}) — loading historical prices.`);
       prices=await fetchPrices(date,{signal});
@@ -95,7 +108,7 @@ async function runSerialDailyCyclic({project,settings,buses,dates,fetchPrices,op
       const reconciliation=verifyDailyResult(request,result,previous,configured);
       const record={date,day_index:index,status:'completed',request,prices,result,reconciliation,
         continuity_scope:newSegment ? 'independent_segment_after_failed_day' : index===0 ? 'configured_initial_state' : 'inherited_previous_day',
-        continuity_note:newSegment ? 'New independent segment using configured initial conditions. No connection transition across the failed date is proven.' : null};
+        continuity_note:newSegment ? 'New independent segment using configured initial conditions. No connection transition across the excluded date is proven.' : null};
       await checkpoint(record);
       records.push(record);
       onDayProgress({date,day_index:index,status:'completed'});
@@ -105,7 +118,7 @@ async function runSerialDailyCyclic({project,settings,buses,dates,fetchPrices,op
       initialConnections=request.charging_sites?.length ? {...result.final_connections} : undefined;
     } catch (error) {
       const cancelled=error.code==='OPTIMIZATION_CANCELLED';
-      const failure={date,day_index:index,status:cancelled ? 'cancelled' : 'failed',request,prices,solver_result:result,error:{detail:error.response?.data?.detail || error.message,diagnostics:error.response?.data?.diagnostics || null,http_status:error.response?.status ?? null}};
+      const failure={date,day_index:index,status:dayFailureStatus(error),exclusion:error.exclusion,request,prices,solver_result:result,error:{code:error.code,detail:error.response?.data?.detail || error.message,diagnostics:error.response?.data?.diagnostics || null,http_status:error.response?.status ?? null}};
       records.push(failure);
       onDayProgress({date,day_index:index,status:failure.status});
       await checkpoint(failure);
@@ -114,15 +127,15 @@ async function runSerialDailyCyclic({project,settings,buses,dates,fetchPrices,op
         records.push(...dates.slice(index+1).map((later,j)=>({date:later,day_index:index+j+1,status:'not_calculated'})));
         return {status:records.some(row=>row.status==='completed') ? 'partial' : 'cancelled',records,dates,error:firstError,finished:false};
       }
-      notify(`Daily Cyclic: ${date} failed. Continuing with the next date as a new independent segment; no state was invented for the missing day.`);
+      notify(`Daily Cyclic: ${date} ${failure.status}. Continuing with the next date as a new independent segment; no state was invented for the missing day.`);
       previous=null;initialConnections=undefined;initialEnergies={};newSegment=true;
     }
   }
   return {status:firstError ? records.some(row=>row.status==='completed') ? 'partial' : 'failed' : 'completed',records,dates,error:firstError,finished:true};
 }
 
-export async function runDailyCyclic(options) {
-  const {project,settings,buses,dates,fetchPrices,optimize,checkpoint,notify=()=>{},onDayProgress=()=>{},onExecution=()=>{},signal,concurrency=2}=options;
+async function runDailyCyclicOnce(options) {
+  const {project,settings,buses,dates,fetchPrices,optimize,checkpoint,notify=()=>{},onDayProgress=()=>{},onExecution=()=>{},signal,concurrency=2,excludedDates=[]}=options;
   const workers=Number.isInteger(concurrency) ? Math.max(1,Math.min(4,concurrency)) : 1;
   const serial=async(reason,seedFailure)=>{
     onExecution({used_workers:1,mode:reason ? 'fallback' : 'serial',fallback_reason:reason || null});
@@ -152,6 +165,7 @@ export async function runDailyCyclic(options) {
     const date=dates[index];let request=null,prices=null,result=null;
     try {
       checkOptimizationCancelled(pool.signal);
+      checkDailyDate(date,excludedDates);
       onDayProgress({date,day_index:index,status:'queued'});
       prices=await fetchPrices(date,{signal:pool.signal});
       checkOptimizationCancelled(pool.signal);
@@ -176,12 +190,12 @@ export async function runDailyCyclic(options) {
         execution.seed_failure={detail:error.message,diagnostics:error.response?.data?.diagnostics || null};
         return false;
       }
-      const failure={date,day_index:index,status:error.code==='OPTIMIZATION_CANCELLED' ? 'cancelled' : 'failed',request,prices,solver_result:result,
-        error:{detail:error.response?.data?.detail || error.message,diagnostics:error.response?.data?.diagnostics || null,http_status:error.response?.status ?? null}};
+      const failure={date,day_index:index,status:dayFailureStatus(error),exclusion:error.exclusion,request,prices,solver_result:result,
+        error:{code:error.code,detail:error.response?.data?.detail || error.message,diagnostics:error.response?.data?.diagnostics || null,http_status:error.response?.status ?? null}};
       records[index]=failure;
       firstError ||= error;
       if (error.code==='OPTIMIZATION_CANCELLED') {stop=true;pool.abort();}
-      else notify(`Daily Cyclic: ${date} failed. Other independent day jobs continue.`);
+      else notify(`Daily Cyclic: ${date} ${failure.status}. Other independent day jobs continue.`);
       onDayProgress({date,day_index:index,status:failure.status});
       await save(failure);
       return false;
@@ -233,6 +247,71 @@ export async function runDailyCyclic(options) {
   }
 }
 
+// Retry only failures before a solver request existed. Permanent solver failures
+// and intentional calendar exclusions do not benefit from re-fetching prices.
+export async function retryDailyPriceFailures(run,options) {
+  if (!run.finished || options.signal?.aborted) return run;
+  const {project,settings,buses,fetchPrices,optimize,checkpoint,notify=()=>{},onDayProgress=()=>{},onExecution=()=>{},signal}=options;
+  const candidates=run.records.filter(row=>row.status==='failed' && !row.request);
+  if (!candidates.length) return run;
+  const configured=Object.fromEntries(buildSolverInputs(project,settings,{buses,hours:24,daily:true}).buses.map(bus=>[bus.id,bus.initial_soc_kwh]));
+  onExecution({mode:'retry',used_workers:1,retry_total:candidates.length,retry_completed:0});
+  notify(`Daily Cyclic: all dates attempted. Retrying historical-price failures once, sequentially (${candidates.length} dates).`);
+  let recovered=0,attempted=0,cancelled=false;
+  for (const original of candidates) {
+    if (signal?.aborted) {cancelled=true;break;}
+    const index=run.records.indexOf(original),date=original.date;
+    const previous=run.records[index-1]?.status==='completed' ? run.records[index-1].result : null;
+    const next=run.records[index+1]?.status==='completed' ? run.records[index+1] : null;
+    const {attempt_history:history=[],...priorAttempt}=original;
+    let request=null,prices=null,result=null,record;
+    try {
+      checkOptimizationCancelled(signal);
+      onDayProgress({date,day_index:original.day_index,status:'running'});
+      notify(`Daily Cyclic: ${date} — retrying historical prices.`);
+      prices=await fetchPrices(date,{signal});
+      checkOptimizationCancelled(signal);
+      const n=1440/settings.time_resolution;
+      if (prices.date!==date || prices.coverage!=='complete' || prices.market_prices?.length!==n || prices.timestamps?.length!==n) throw new Error(`${date}: incomplete or mismatched historical prices.`);
+      request=buildSolverInputs(project,settings,{buses,hours:24,scenario:'baseline',daily:true,cyclicConnections:true,
+        marketPrices:prices.market_prices,prices:effectivePrices(prices.market_prices,project.meta?.price_assumptions),
+        initialConnections:previous?.final_connections,initialEnergies:previous ? Object.fromEntries(buses.map(bus=>[bus.id,previous.soc_profiles[bus.id].at(-1)])) : undefined});
+      if (run.execution?.boundary) request.daily_connection_boundary=run.execution.boundary;
+      result=await optimize(request,{date,day_index:original.day_index,chunk_number:original.day_index+1,
+        global_start_period:original.day_index*n,global_start_minute:original.day_index*1440,retry_attempt:1},{signal});
+      const reconciliation=verifyDailyResult(request,result,previous,configured);
+      // Filling a gap must also fit the existing next day's frozen schedule.
+      if (next) verifyDailyResult(next.request,next.result,result,configured);
+      record={date,day_index:original.day_index,status:'completed',request,prices,result,reconciliation,
+        retry_attempts:1,attempt_history:[...history,priorAttempt],continuity_scope:previous ? 'inherited_previous_day' : 'independent_segment_after_failed_day',
+        continuity_note:previous ? null : 'Retry starts from configured initial conditions; no transition across an excluded date is proven.'};
+      recovered++;
+    } catch(error) {
+      cancelled=error.code==='OPTIMIZATION_CANCELLED' || signal?.aborted;
+      record={...original,request,prices,solver_result:result,retry_attempts:1,attempt_history:[...history,priorAttempt],
+        error:{code:error.code,detail:error.response?.data?.detail || error.message,diagnostics:error.response?.data?.diagnostics || null,http_status:error.response?.status ?? null}};
+      // A cancelled retry does not erase the original failed-day classification.
+      if (cancelled) record.retry_cancelled=true;
+    }
+    run.records[index]=record;
+    await checkpoint(record);
+    onDayProgress({date,day_index:record.day_index,status:record.status});
+    attempted++;
+    onExecution({mode:'retry',retry_total:candidates.length,retry_completed:attempted});
+    if (cancelled) break;
+  }
+  const incomplete=run.records.find(row=>row.status!=='completed');
+  const completed=run.records.some(row=>row.status==='completed');
+  return {...run,status:incomplete ? completed ? 'partial' : 'failed' : 'completed',finished:!cancelled,
+    error:incomplete?.error ? dailyRecordError(incomplete) : null,
+    execution:{...run.execution,price_retry:{attempted,recovered,remaining:candidates.length-recovered,cancelled}}};
+}
+
+export async function runDailyCyclic(options) {
+  const run=await runDailyCyclicOnce(options);
+  return options.retryPriceFailures===false ? run : retryDailyPriceFailures(run,options);
+}
+
 export function aggregateDailyRun(run) {
   const good=run.records.filter(row=>row.status==='completed').sort((a,b)=>a.day_index-b.day_index);
   if (!good.length) return null;
@@ -240,12 +319,14 @@ export function aggregateDailyRun(run) {
   const payload={scenario:'baseline',is_long_term:true,total_days:good.length,requested_days:run.dates.length,run_status:run.status,
     long_term_mode:'daily_cyclic',timetable_scope:'The same configured daily timetable is repeated on every date. No weekend/holiday timetable or global multi-day optimum.',
     daily_execution:run.execution,completed_dates:good.map(row=>row.date),completed_day_indices:good.map(row=>row.day_index),
+    dst_policy:'skip',skipped_dates:run.records.filter(row=>row.status==='skipped').map(row=>({date:row.date,...row.exclusion})),
     profile_layout:'Completed daily profiles concatenated in date order. Missing days are not filled. Map profile slots to completed_dates/completed_day_indices; original daily requests/results retain local 0..1440-minute time.',
     day_records:run.records.map(row=>({date:row.date,day_index:row.day_index,status:row.status,reconciliation:row.reconciliation,error:row.error,
-      continuity_scope:row.continuity_scope,continuity_note:row.continuity_note,
+      continuity_scope:row.continuity_scope,continuity_note:row.continuity_note,exclusion:row.exclusion,
+      retry_attempts:row.retry_attempts,attempt_history:row.attempt_history,retry_cancelled:row.retry_cancelled,
       solver_status:row.result?.status,optimality_proven:row.status==='completed' ? row.result.status.startsWith('Optimal') : null,
       market_prices:row.prices?.market_prices,effective_prices:row.request?.electricity_prices,timestamps:row.prices?.timestamps})),
-    daily_results:good.map(row=>({date:row.date,day_index:row.day_index,request:row.request,prices:row.prices,result:row.result})),
+    daily_results:good.map(row=>({date:row.date,day_index:row.day_index,request:row.request,prices:row.prices,result:row.result,attempt_history:row.attempt_history})),
     failed_attempts:run.records.filter(row=>row.status==='failed' || row.status==='cancelled'),
     total_cost_eur:sum(good.map(row=>row.reconciliation.cost_eur)),total_energy_mwh:sum(good.map(row=>row.reconciliation.charger_energy_mwh)),
     peak_load_kw:Math.max(...results.map(result=>Math.max(...result.aggregated_load_profile))),

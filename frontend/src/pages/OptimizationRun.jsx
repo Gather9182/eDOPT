@@ -483,19 +483,21 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       const issues=dailyConfigurationIssues({...project,buses},settings,scenario);
       if (issues.length) throw new Error(issues.map(issue=>issue.message).join(' '));
       addLog('Validating historical calendar in Europe/Vienna. Daily Cyclic repeats the configured timetable; no calendar-day timetable changes.');
-      const {dates}=await historicalCalendar(longTermConfig.startDate,longTermConfig.endDate,settings.time_resolution);
-      let capacity=1;
+      const {dates,excluded_dates:excludedDates=[]}=await historicalCalendar(longTermConfig.startDate,longTermConfig.endDate,settings.time_resolution);
+      if (excludedDates.length) addLog(`Daily Cyclic: skipping daylight-saving transition dates: ${excludedDates.map(day=>`${day.date} (${day.local_day_hours}h)`).join(', ')}. These dates are excluded from all totals.`);
+      let capacity=1,capabilityReport=null;
       try {
-        const reported=(await optimizationCapabilities()).daily_workers;
+        capabilityReport=await optimizationCapabilities();
+        const reported=capabilityReport.daily_workers;
         capacity=Number.isInteger(reported) && reported>=1 ? Math.min(4,reported) : 1;
       }
       catch { addLog('Backend parallel capability could not be confirmed. Using one day worker.'); }
       const concurrency=Math.min(longTermConfig.dailyWorkers || 2,capacity);
-      setDailyExecution({requested:longTermConfig.dailyWorkers || 2,capacity,used_workers:concurrency,mode:concurrency>1 ? 'seed' : 'serial'});
+      setDailyExecution({requested:longTermConfig.dailyWorkers || 2,capacity,capabilityReport,used_workers:concurrency,mode:concurrency>1 ? 'seed' : 'serial'});
       addLog(`Daily Cyclic: requested ${longTermConfig.dailyWorkers || 2} worker(s), host permits ${capacity}, using at most ${concurrency}.`);
       setDayStatuses(Object.fromEntries(dates.map(date=>[date,'not_calculated'])));
-      const run=await runDailyCyclic({project,settings,buses,dates,
-        concurrency,signal:runAbortRef.current?.signal,
+      const run=await runDailyCyclic({project,settings,buses,dates,excludedDates,
+        concurrency,retryPriceFailures:longTermConfig.retryPriceFailures!==false,signal:runAbortRef.current?.signal,
         onExecution:execution=>setDailyExecution(previous=>({...previous,...execution})),
         onDayProgress:day=>setDayStatuses(previous=>({...previous,[day.date]:day.status})),
         fetchPrices:async (date,{signal=runAbortRef.current?.signal}={})=>{
@@ -519,6 +521,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         }});
       const payload=aggregateDailyRun(run);
       if (payload) {
+        payload.daily_execution={...payload.daily_execution,host_capabilities:capabilityReport};
         payload.run_metadata={...fleetRunMetadata(project),...runAuditMetadata(analysisRunRef.current.context,validationState?.diagnostic,logsRef.current,analysisRunRef.current.requests),
           run_id:runId,timestamp:new Date().toISOString(),scenario:'baseline',is_long_term:true,long_term_mode:'daily_cyclic',
           settings:{...settings,longTermConfig:{...longTermConfig,chunkSizeHours:24}},
@@ -530,11 +533,11 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         setStatus('ready');onComplete('results');return;
       }
       if (run.status!=='completed') {
-        const failed=run.records.find(row=>row.status==='failed') || run.records.find(row=>row.status==='cancelled');
+        const failed=run.records.find(row=>row.status==='failed') || run.records.find(row=>row.status==='cancelled') || run.records.find(row=>row.status==='skipped');
         optimizationAttemptRef.current = {context:{...failureContext(),daily_run:{execution:run.execution,finished:run.finished,records:run.records}},request:failed.request,attempt:{date:failed.date,mode:'daily_cyclic',phase:failed.request ? 'daily_solve_or_check' : 'historical_prices'}};
         recordOptimizationFailure(dailyRecordError(failed));
         setDailyRunSummary({status:run.status,finished:run.finished,completed:run.records.filter(row=>row.status==='completed').length,
-          failures:run.records.filter(row=>row.status==='failed' || row.status==='cancelled')});
+          failures:run.records.filter(row=>row.status!=='completed' && row.status!=='not_calculated')});
         addLog(`Daily Cyclic ${run.finished ? 'finished with day errors' : 'was cancelled'}. Completed days remain saved; no routes were excluded.`);
         setStatus('ready');return;
       }
@@ -2009,7 +2012,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
               ))}
             </div>
 
-            {simulationMode === 'daily_cyclic' && <p className="text-sm text-muted mt-4">Baseline only: one complete 24-hour solve per historical date, using the same configured daily timetable. Daily bus SoC equality and physical connector continuity are checked. Prices are strictly validated; DST transition days and overnight optional charging visits are not supported. No weekend/holiday timetable changes or global multi-day optimum. Run Check validates technical settings; prices are checked again for each actual day.</p>}
+            {simulationMode === 'daily_cyclic' && <p className="text-sm text-muted mt-4">Baseline only: one complete 24-hour solve per historical date, using the same configured daily timetable. Daily bus SoC equality and physical connector continuity are checked. Daylight-saving transition days (23/25 hours) are skipped, clearly marked and excluded from all totals; the remaining dates continue normally. No replacement prices or results are generated. Prices are strictly validated. Overnight optional charging visits are not supported. No weekend/holiday timetable changes or global multi-day optimum. Both date endpoints are included. Run Check validates technical settings; prices are checked again for each actual day.</p>}
             {simulationMode !== 'single' && (
               <div className="grid grid-cols-3 gap-x-4 gap-y-4 mt-4 animate-in slide-in-from-top-2 duration-300">
                 <div className="form-group mb-0">
@@ -2057,6 +2060,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                       {[1,2,3,4].map(value=><option key={value} value={value}>{value}{value===1 ? ' — serial' : value===2 ? ' — default' : ''}</option>)}
                     </CustomSelect>
                     <p className="text-sm text-muted mt-2">After a verified seed day. Host capacity may reduce this setting; unsafe midnight boundaries use serial execution. This does not shorten an individual solver timeout.</p>
+                    <label className="flex items-center gap-2 mt-3 text-sm"><input type="checkbox" checked={longTermConfig.retryPriceFailures!==false} onChange={event=>setLongTermConfig(previous=>({...previous,retryPriceFailures:event.target.checked}))} />Retry failed historical-price days after all dates</label>
+                    <p className="text-sm text-muted mt-2">One sequential retry per failed price day with fresh data and unchanged settings. Successful days and DST exclusions are retained. Missing prices are never replaced.</p>
                   </div>}
                 </div>
               </div>

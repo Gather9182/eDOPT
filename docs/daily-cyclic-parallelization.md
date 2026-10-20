@@ -5,6 +5,30 @@ Implemented 20 October 2026, based on
 
 ## Feasibility and physical boundaries
 
+### Worker capacity diagnostics
+
+`GET /api/optimize/capabilities` now reports current and startup resource
+measurements: available RAM in bytes, logical CPU count, the conservative
+2 GiB/job estimate, parsed/raw `EDOPT_DAILY_WORKERS`, limiting factors and a UTC
+measurement timestamp. These are the backend process environment's values;
+restricted execution environments can differ from Windows Task Manager.
+The progress panel explains these values (expanded automatically when limited),
+and successful/partial run exports retain the capacity report.
+
+When idle, a capability request refreshes the executor and semaphore to match
+current capacity. Active/queued/cancelling jobs keep their existing pool; the
+response explains deferred changes. No active run is interrupted or resized.
+Explicit constructor capacity overrides remain fixed for controlled tests.
+The rule remains a conservative estimate, not actual model memory profiling.
+
+An unrestricted host check on 20 October 2026 measured 16 logical cores and
+16,695,595,008 available bytes and permitted four workers. Four small real
+Daily Cyclic MILP jobs entered their workers together and all finished with
+`Optimal (Baseline Optimized)`. A restricted execution measurement had reported
+about 3 GiB; that was not a valid measurement of the user's unrestricted host.
+Regression tests additionally prove safe deferred refresh from one to four
+workers and reduction back to one while idle.
+
 Parallel days are valid only when price changes are the only external changes
 and the midnight connection state is repeatable. Daily battery equality alone
 does not establish that independence.

@@ -8,13 +8,18 @@ import pytz
 import math
 
 
-def historical_day_grid(date_str, resolution_min=15):
+def historical_day_bounds(date_str):
     day = dt.date.fromisoformat(date_str)
-    if resolution_min < 1 or 1440 % resolution_min:
-        raise ValueError('Historical comparison resolution must divide 1440 minutes exactly.')
     zone = pytz.timezone('Europe/Vienna')
     start = zone.localize(dt.datetime.combine(day,dt.time())).astimezone(dt.timezone.utc)
     end = zone.localize(dt.datetime.combine(day+dt.timedelta(days=1),dt.time())).astimezone(dt.timezone.utc)
+    return start,end
+
+
+def historical_day_grid(date_str, resolution_min=15):
+    if resolution_min < 1 or 1440 % resolution_min:
+        raise ValueError('Historical comparison resolution must divide 1440 minutes exactly.')
+    start,end = historical_day_bounds(date_str)
     if end-start != dt.timedelta(hours=24):
         raise ValueError(f'{date_str}: daylight-saving transition days (23/25 hours) are not supported by Daily Cyclic. No artificial 24-hour prices were generated.')
     return start,end
@@ -25,9 +30,22 @@ def historical_calendar(start_date,end_date,resolution_min=15):
     if last < first or (last-first).days > 3660:
         raise ValueError('Choose an ordered date range of at most 3661 days.')
     dates = [(first+dt.timedelta(days=i)).isoformat() for i in range((last-first).days+1)]
-    for date in dates:
-        historical_day_grid(date,resolution_min)
+    # A calendar range is valid even if an individual date cannot be modelled.
+    # Day-specific price errors belong to that day's record, not to Run Check.
+    if resolution_min < 1 or 1440 % resolution_min:
+        raise ValueError('Historical comparison resolution must divide 1440 minutes exactly.')
     return dates
+
+
+def historical_calendar_exclusions(dates):
+    exclusions=[]
+    for date in dates:
+        start,end=historical_day_bounds(date)
+        hours=int((end-start).total_seconds()/3600)
+        if hours != 24:
+            exclusions.append(dict(date=date,code='DST_DAY_SKIPPED',local_day_hours=hours,
+                reason=f'Daylight-saving transition ({hours}-hour local day in Europe/Vienna). Excluded from the 24-hour Daily Cyclic model and all totals; no replacement prices or results are generated.'))
+    return exclusions
 
 
 def map_strict_historical_day(date_str,resolution_min,raw_prices):

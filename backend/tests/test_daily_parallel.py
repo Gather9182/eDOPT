@@ -3,7 +3,7 @@ from threading import Event,Lock
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.services.optimization_progress import OptimizationJobs,Progress,OptimizationCancelled,current_progress,report_progress,daily_worker_capacity
+from app.services.optimization_progress import OptimizationJobs,Progress,OptimizationCancelled,current_progress,report_progress,daily_worker_capacity,daily_worker_resources
 from app.services.daily_boundary import required_boundary_pairs,validate_daily_boundary
 from app.services.solver import run_milp_solver
 from app.services.solver_diagnostics import OptimizationFailure
@@ -109,14 +109,49 @@ class DailyParallelTests(unittest.TestCase):
         entered=[Event() for _ in range(4)];release=Event()
         def runner(inputs):
             entered[inputs.index].set();release.wait(4);return {'index':inputs.index}
-        with patch('app.services.optimization_progress.daily_worker_capacity',return_value=4):
-            jobs=OptimizationJobs(runner)
+        jobs=OptimizationJobs(runner,daily_workers=4)
         try:
             keys=[jobs.submit(SimpleNamespace(daily_cyclic=True,index=i)) for i in range(4)]
             self.assertTrue(all(event.wait(2) for event in entered))
             self.assertTrue(all(jobs.get(key)['status']=='running' for key in keys))
             self.assertEqual(jobs.capabilities()['daily_workers'],4)
         finally:release.set();jobs.shutdown()
+
+    def test_capacity_explains_measurements_and_refreshes_when_idle_without_interrupting_jobs(self):
+        entered=Event();release=Event()
+        def runner(inputs):
+            entered.set();release.wait(4);return {}
+        with patch.dict('os.environ',{},clear=True),patch('app.services.optimization_progress.os.cpu_count',return_value=16),patch('app.services.optimization_progress.available_worker_memory',return_value=3*1024**3) as memory:
+            jobs=OptimizationJobs(runner)
+            try:
+                initial=jobs.capabilities()
+                self.assertEqual(initial['daily_workers'],1)
+                self.assertEqual(initial['resources']['available_memory_bytes'],3*1024**3)
+                self.assertEqual(initial['resources']['limiting_factors'],['available_memory'])
+                key=jobs.submit(SimpleNamespace(daily_cyclic=True))
+                self.assertTrue(entered.wait(2))
+                memory.return_value=16*1024**3
+                busy=jobs.capabilities()
+                self.assertTrue(busy['refresh_deferred'])
+                self.assertEqual(busy['daily_workers'],1)
+                self.assertEqual(busy['resources']['daily_workers'],4)
+                release.set();jobs.daily_executor.shutdown(wait=True)
+                refreshed=jobs.capabilities()
+                self.assertEqual(refreshed['daily_workers'],4)
+                self.assertFalse(refreshed['refresh_deferred'])
+                self.assertEqual(refreshed['startup_resources']['daily_workers'],1)
+                self.assertEqual(jobs.get(key)['status'],'completed')
+                # A later reduction also updates safely while idle.
+                memory.return_value=3*1024**3
+                self.assertEqual(jobs.capabilities()['daily_workers'],1)
+            finally:release.set();jobs.shutdown()
+
+    def test_invalid_capacity_configuration_is_reported_explicitly(self):
+        with patch.dict('os.environ',{'EDOPT_DAILY_WORKERS':'invalid'}):
+            report=daily_worker_resources()
+            self.assertEqual(report['daily_workers'],1)
+            self.assertIn('detection_failed',report['limiting_factors'])
+            self.assertIsNotNone(report['detection_error'])
 
     def test_feasible_incumbent_is_not_reported_as_a_proven_optimum(self):
         import pulp
