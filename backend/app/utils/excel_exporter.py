@@ -1,8 +1,30 @@
 import io
+import math
 import pandas as pd
 import numpy as np
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
+
+
+def arrival_comparable(results):
+    cost = results.get('baseline_cost_eur')
+    return (results.get('baseline_feasible') is True and isinstance(cost, (float, int)) and math.isfinite(cost)
+            and not str(results.get('status', '')).startswith('Heuristic'))
+
+
+def arrival_energy_comparable(results):
+    profile = results.get('baseline_aggregated_load_profile', [])
+    return (arrival_comparable(results) and bool(profile)
+            and len(profile) == len(results.get('electricity_prices', [])))
+
+
+def exported_time_range(results, inputs):
+    step = inputs.get('time_step_minutes')
+    if not isinstance(step, (int, float)) or step <= 0:
+        return 'Not recorded'
+    hours = len(results.get('electricity_prices', [])) * step / 60
+    start = inputs.get('start_date') or inputs.get('reference_date')
+    return f'{start}: {hours:g} planning hours' if start else f'{hours:g} planning hours (calendar start not recorded)'
 
 class ExcelExporter:
     @staticmethod
@@ -21,6 +43,14 @@ class ExcelExporter:
             else:
                 ExcelExporter._write_single_horizon(writer, results)
             ExcelExporter._write_charging_sites(writer, results)
+            end = results.get('end_condition', {})
+            if end:
+                pd.DataFrame([{'Setting':key,'Value':str(value)} for key,value in end.items() if key != 'buses']).to_excel(writer,sheet_name='End Condition Settings',index=False)
+                pd.DataFrame(end.get('buses', [])).to_excel(writer,sheet_name='Bus End Conditions',index=False)
+            policy = results.get('soc_policy', {})
+            if policy:
+                pd.DataFrame([{'Setting': key, 'Value': str(value)} for key, value in policy.items() if key != 'violations']).to_excel(writer, sheet_name='Operating SoC Settings', index=False)
+                pd.DataFrame(policy.get('violations', []), columns=['bus_id', 'state_index', 'minute', 'kind', 'soc_kwh', 'limit_kwh', 'deviation_kwh', 'soc_percent', 'initial_state']).to_excel(writer, sheet_name='Operating SoC Deviations', index=False)
             if results.get('opportunity_charging_visits'):
                 pd.DataFrame(results['opportunity_charging_visits']).to_excel(writer, sheet_name='Optional Charging Trips', index=False, startrow=2)
                 ExcelExporter._apply_table_formatting(writer, 'Optional Charging Trips', 'Chosen round trips, charging and additional travel consumption')
@@ -232,7 +262,7 @@ class ExcelExporter:
         
         meta_data = [
             ["Scenario Active", scenario],
-            ["Time Range", f"{results.get('electricity_prices', [0])*0} {results.get('scenario', 'baseline')} run"],
+            ["Time Range", exported_time_range(results, inputs)],
             ["Planning Horizon", f"{inputs.get('planning_horizon_hours', 24)} Hours"],
             ["Time Step Resolution", f"{inputs.get('time_step_minutes', 15)} min"],
             ["CO2 Emission Factor", f"{co2_factor} g/kWh"],
@@ -253,7 +283,8 @@ class ExcelExporter:
         worksheet["D3"].font = Font(name="Calibri", size=12, bold=True, color="4B5563")
         
         cost = results.get("total_cost_eur", 0.0)
-        base_cost = results.get("baseline_cost_eur", 0.0)
+        base_cost = results.get("baseline_cost_eur")
+        base_cost = base_cost if isinstance(base_cost, (int, float)) and math.isfinite(base_cost) else 0.0
         savings = base_cost - cost if base_cost > 0 else 0.0
         savings_pct = (savings / base_cost * 100) if base_cost > 0 else 0.0
         
@@ -270,13 +301,13 @@ class ExcelExporter:
         co2_saved_t = base_co2_emissions_t - co2_emissions_t
         
         ExcelExporter._create_kpi_card(worksheet, start_col=4, start_row=4, label="Total Cost", value=f"€{cost:,.2f}")
-        ExcelExporter._create_kpi_card(worksheet, start_col=6, start_row=4, label="Baseline Cost", value=f"€{base_cost:,.2f}", color="6B7280")
+        ExcelExporter._create_kpi_card(worksheet, start_col=6, start_row=4, label="Baseline Cost", value=f"€{base_cost:,.2f}" if arrival_comparable(results) else "n.a. (reference not comparable)", color="6B7280")
         
-        ExcelExporter._create_kpi_card(worksheet, start_col=4, start_row=7, label="Financial Savings", value="n.a. (arrival baseline infeasible)" if results.get("baseline_feasible") is False else f"€{savings:,.2f} ({savings_pct:.1f}%)", color="059669" if savings > 0 else "1E3A8A")
+        ExcelExporter._create_kpi_card(worksheet, start_col=4, start_row=7, label="Financial Savings", value="n.a. (reference not comparable)" if not arrival_comparable(results) else f"€{savings:,.2f} ({savings_pct:.1f}%)", color="059669" if savings > 0 else "1E3A8A")
         ExcelExporter._create_kpi_card(worksheet, start_col=6, start_row=7, label="Peak Grid Import", value=f"{results.get('peak_load_kw', 0.0):,.1f} kW", color="DC2626")
         
         ExcelExporter._create_kpi_card(worksheet, start_col=4, start_row=10, label="Grid Import Energy", value=f"{energy_mwh:,.2f} MWh")
-        ExcelExporter._create_kpi_card(worksheet, start_col=6, start_row=10, label="Estimated CO2 Saved", value=f"{co2_saved_t:.3f} t CO2", color="10B981" if co2_saved_t > 0 else "1E3A8A")
+        ExcelExporter._create_kpi_card(worksheet, start_col=6, start_row=10, label="Estimated CO2 Saved", value=f"{co2_saved_t:.3f} t CO2" if arrival_energy_comparable(results) else "n.a. (reference not comparable)", color="10B981" if co2_saved_t > 0 else "1E3A8A")
 
         # Section 3: Scenario PV/BESS breakdown if present
         curr_row = 13
@@ -508,7 +539,8 @@ class ExcelExporter:
         worksheet["D3"].font = Font(name="Calibri", size=12, bold=True, color="4B5563")
         
         cost = results.get("total_cost_eur", 0.0)
-        base_cost = results.get("baseline_cost_eur", 0.0)
+        base_cost = results.get("baseline_cost_eur")
+        base_cost = base_cost if isinstance(base_cost, (int, float)) and math.isfinite(base_cost) else 0.0
         savings = base_cost - cost if base_cost > 0 else 0.0
         savings_pct = (savings / base_cost * 100) if base_cost > 0 else 0.0
         
@@ -523,13 +555,13 @@ class ExcelExporter:
         co2_saved_t = base_co2_emissions_t - co2_emissions_t
         
         ExcelExporter._create_kpi_card(worksheet, start_col=4, start_row=4, label="Total Cost", value=f"€{cost:,.2f}")
-        ExcelExporter._create_kpi_card(worksheet, start_col=6, start_row=4, label="Baseline Cost", value=f"€{base_cost:,.2f}", color="6B7280")
+        ExcelExporter._create_kpi_card(worksheet, start_col=6, start_row=4, label="Baseline Cost", value=f"€{base_cost:,.2f}" if arrival_comparable(results) else "n.a. (reference not comparable)", color="6B7280")
         
-        ExcelExporter._create_kpi_card(worksheet, start_col=4, start_row=7, label="Accumulated Savings", value="n.a. (arrival baseline infeasible)" if results.get("baseline_feasible") is False else f"€{savings:,.2f} ({savings_pct:.1f}%)", color="059669" if savings > 0 else "1E3A8A")
+        ExcelExporter._create_kpi_card(worksheet, start_col=4, start_row=7, label="Accumulated Savings", value="n.a. (reference not comparable)" if not arrival_comparable(results) else f"€{savings:,.2f} ({savings_pct:.1f}%)", color="059669" if savings > 0 else "1E3A8A")
         ExcelExporter._create_kpi_card(worksheet, start_col=6, start_row=7, label="Max Peak Load", value=f"{results.get('peak_load_kw', 0.0):,.1f} kW", color="DC2626")
         
         ExcelExporter._create_kpi_card(worksheet, start_col=4, start_row=10, label="Grid Import Energy", value=f"{energy_mwh:,.2f} MWh")
-        ExcelExporter._create_kpi_card(worksheet, start_col=6, start_row=10, label="CO2 Offsets Saved", value=f"{co2_saved_t:.3f} t CO2", color="10B981" if co2_saved_t > 0 else "1E3A8A")
+        ExcelExporter._create_kpi_card(worksheet, start_col=6, start_row=10, label="CO2 Offsets Saved", value=f"{co2_saved_t:.3f} t CO2" if arrival_energy_comparable(results) else "n.a. (reference not comparable)", color="10B981" if co2_saved_t > 0 else "1E3A8A")
 
         # Solar & BESS Metrics
         curr_row = 13
@@ -598,8 +630,8 @@ class ExcelExporter:
             
             # Calculate Costs (Price is EUR/MWh, Grid import is kW)
             day_cost = sum(g * p / 1000.0 * dt for g, p in zip(day_grid, day_prices)) if day_grid else 0.0
-            day_base_cost = sum(b * p / 1000.0 * dt for b, p in zip(day_base, day_prices)) if day_base else day_cost
-            day_savings = day_base_cost - day_cost
+            day_base_cost = sum(b * p / 1000.0 * dt for b, p in zip(day_base, day_prices)) if day_base and len(day_base) == len(day_prices) else None
+            day_savings = day_base_cost - day_cost if arrival_energy_comparable(results) and day_base_cost is not None else None
             
             day_peak = max(day_grid) if day_grid else 0.0
             day_energy = sum(day_grid) * dt / 1000.0 if day_grid else 0.0
@@ -608,8 +640,8 @@ class ExcelExporter:
                 day + 1,
                 date_label,
                 round(day_cost, 2),
-                round(day_base_cost, 2),
-                round(day_savings, 2),
+                round(day_base_cost, 2) if day_base_cost is not None else None,
+                round(day_savings, 2) if day_savings is not None else None,
                 round(day_peak, 1),
                 round(day_energy, 3)
             ]

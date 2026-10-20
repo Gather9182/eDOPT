@@ -6,6 +6,8 @@ Failure even in this optimistic case proves an individual energy shortfall.
 
 
 from .opportunity_charging import potential_profiles, possible_availability
+from .soc_policy import minimum_energy, preferred_maximum
+from .end_conditions import end_target
 
 
 def energy_feasibility_issues(inputs):
@@ -15,6 +17,19 @@ def energy_feasibility_issues(inputs):
         return []
     issues = []
     for bus in inputs.buses:
+        if inputs.use_cyclic_soc and bus.min_final_soc_kwh > bus.initial_soc_kwh + .001:
+            issues.append(dict(type='ERROR', code='BUS_CYCLIC_RESERVE_CONFLICT', category='energy', bus_id=bus.id,
+                message=f'Route {bus.id}: End reserve ({bus.min_final_soc_kwh:.1f} kWh) exceeds initial SoC '
+                        f'({bus.initial_soc_kwh:.1f} kWh), conflicting with Start SoC = End SoC.'))
+        hard_max = inputs.operating_max_soc_enabled and inputs.operating_max_soc_mode == 'hard'
+        upper = preferred_maximum(inputs, bus) if hard_max else bus.max_battery_capacity_kwh
+        if hard_max and bus.initial_soc_kwh > upper + .01:
+            issues.append(dict(type='ERROR', code='BUS_OPERATING_MAX_INITIAL', category='energy', bus_id=bus.id,
+                message=f'Route {bus.id}: Initial SoC ({bus.initial_soc_kwh:.1f} kWh) exceeds the hard operating maximum ({upper:.1f} kWh).'))
+        floor = minimum_energy(inputs, bus) if inputs.operating_min_soc_mode == 'hard' else 0
+        if bus.initial_soc_kwh < floor - .01:
+            issues.append(dict(type='ERROR', code='BUS_OPERATING_MIN_INITIAL', category='energy', bus_id=bus.id,
+                message=f'Route {bus.id}: Initial SoC ({bus.initial_soc_kwh:.1f} kWh) is below the hard operating minimum ({floor:.1f} kWh).'))
         if len(bus.availability) != n or len(bus.trip_energy_profile_kwh) != n:
             continue
         potential = potential_profiles(bus, inputs)
@@ -24,7 +39,10 @@ def energy_feasibility_issues(inputs):
                 or bus.initial_soc_kwh < 0 or bus.initial_soc_kwh > bus.max_battery_capacity_kwh
                 or any(energy < 0 for energy in bus.trip_energy_profile_kwh)):
             continue
-        target = bus.min_final_soc_kwh + (bus.next_day_required_energy_kwh if inputs.use_next_day_readiness else 0)
+        target = end_target(inputs, bus)
+        if hard_max and upper + .01 < target <= bus.max_battery_capacity_kwh + .01:
+            issues.append(dict(type='ERROR', code='BUS_FINAL_TARGET_EXCEEDS_OPERATING_MAX', category='energy', bus_id=bus.id,
+                message=f'Route {bus.id}: The final energy target ({target:.1f} kWh) exceeds the hard operating maximum ({upper:.1f} kWh). Review the maximum, end reserve or Next-Day Readiness.'))
         if target > bus.max_battery_capacity_kwh + .01:
             issues.append(dict(type='ERROR', code='BUS_FINAL_TARGET_EXCEEDS_CAPACITY', category='energy', bus_id=bus.id,
                 details=dict(required_energy_kwh=target, battery_capacity_kwh=bus.max_battery_capacity_kwh,
@@ -53,19 +71,19 @@ def energy_feasibility_issues(inputs):
                     power = 0
             # Match the solver's interval-end capacity bound, including legacy
             # profiles with charging and consumption during the same interval.
-            soc = min(bus.max_battery_capacity_kwh, soc + max(0, power) * dt * bus.efficiency - energy)
-            if soc < -.01:
+            soc = min(upper, soc + max(0, power) * dt * bus.efficiency - energy)
+            if soc < floor - .01:
                 minute = inputs.horizon_start_minute + t * inputs.time_step_minutes
                 issues.append(dict(type='ERROR', code='BUS_ENERGY_INFEASIBLE', category='energy', bus_id=bus.id,
-                    details=dict(reason='trip_energy_shortfall', period=t, minute=minute, missing_energy_kwh=-soc,
+                    details=dict(reason='trip_energy_shortfall', period=t, minute=minute, missing_energy_kwh=floor-soc,
                                  battery_capacity_kwh=bus.max_battery_capacity_kwh),
-                    message=f'Route {bus.id}: At least {-soc:.1f} kWh is missing in the interval starting at '
+                    message=f'Route {bus.id}: At least {floor-soc:.1f} kWh is missing to meet the battery/operating minimum in the interval starting at '
                             f'{int(minute)//60%24:02d}:{int(minute)%60:02d}, even with the maximum possible charging '
                             f'and no competition (battery: {bus.max_battery_capacity_kwh:.1f} kWh). '
                             'Review battery capacity, consumption and charging opportunities before this trip.'))
                 break
         else:
-            if soc + .01 < target and target <= bus.max_battery_capacity_kwh + .01:
+            if soc + .01 < target and target <= upper + .01:
                 issues.append(dict(type='ERROR', code='BUS_ENERGY_INFEASIBLE', category='energy', bus_id=bus.id,
                     details=dict(reason='final_energy_shortfall', maximum_final_energy_kwh=soc, required_energy_kwh=target,
                                  missing_energy_kwh=target-soc),

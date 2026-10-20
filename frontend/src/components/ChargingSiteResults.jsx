@@ -18,7 +18,6 @@ export default function ChargingSiteResults({ results, day = null }) {
   const clock = minute => `Tag ${Math.floor(minute/1440)+1}, ${String(Math.floor(minute/60)%24).padStart(2,'0')}:${String(minute%60).padStart(2,'0')}`;
   return <div className="card p-6 mb-6">
     <h2 className="text-lg font-bold mb-3">Ladeorte und Anschlussbelegung</h2>
-    {results.baseline_feasible === false && <p role="alert" className="text-warning mb-3">Die Vergleichsstrategie „Laden bei Ankunft“ erfüllt nicht alle Betriebsbedingungen. Kosten- und CO₂-Einsparungen gegenüber dieser Strategie sind kein belastbarer Vergleich. {results.baseline_issues?.slice(0,3).join(' ')}</p>}
     <div style={{ overflowX: 'auto' }}><table className="data-table"><thead><tr><th>Ladeort</th><th>Geladen (kWh)</th><th>Spitzenleistung (kW)</th><th>Max. belegte Ladepunkte</th></tr></thead><tbody>
       {ids.map(id => { const p = profiles[id].slice(from,to); return <tr key={id}><td>{name(id)}</td><td>{(p.reduce((a,b) => a+b,0)*step/60).toFixed(1)}</td><td>{Math.max(0,...p).toFixed(1)}</td><td>{Math.max(0,...(results.site_occupied_connectors?.[id] || []).slice(from,to))}</td></tr>; })}
     </tbody></table></div>

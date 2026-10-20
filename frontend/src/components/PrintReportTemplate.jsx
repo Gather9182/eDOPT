@@ -1,4 +1,5 @@
 import React from 'react';
+import {arrivalComparison} from '../utils/arrivalComparison';
 
 // Easily customizable corporate branding config
 export const BRANDING = {
@@ -29,8 +30,9 @@ const PrintReportTemplate = ({ results, projectData }) => {
   
   // Financial calculation
   const cost = results.total_cost_eur || 0.0;
+  const comparison = arrivalComparison(results);
   const baseCost = results.baseline_cost_eur || 0.0;
-  const savings = baseCost > 0 ? baseCost - cost : 0.0;
+  const savings = comparison.savings ?? 0;
   const savingsPct = baseCost > 0 ? (savings / baseCost) * 100 : 0.0;
   
   // CO2 calculation
@@ -166,6 +168,10 @@ const PrintReportTemplate = ({ results, projectData }) => {
                 <td>{numBuses} buses</td>
               </tr>
               <tr>
+                <td style={{ fontWeight: 'bold', padding: '6px 0' }}>Bus end condition:</td>
+                <td>{results.end_condition?.mode === 'cyclic_soc' ? 'Start SoC = End SoC (hard, 24 h)' : results.end_condition?.mode === 'next_day_readiness' ? 'Next-Day Readiness' : results.end_condition?.mode === 'end_reserve' ? 'Minimum end reserve' : 'Not recorded'}</td>
+              </tr>
+              <tr>
                 <td style={{ fontWeight: 'bold', padding: '6px 0' }}>CO2 Emission Intensity:</td>
                 <td>{co2Factor} g CO2/kWh</td>
               </tr>
@@ -186,11 +192,11 @@ const PrintReportTemplate = ({ results, projectData }) => {
             </div>
             <div className="print-kpi-card-el">
               <span className="lbl">Financial Savings</span>
-              <span className="val" style={{ color: BRANDING.greenColor }}>€{savings.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ({savingsPct.toFixed(1)}%)</span>
+              <span className="val" style={{ color: BRANDING.greenColor }}>{comparison.comparable ? `€${savings.toFixed(2)}${comparison.percent === null ? '' : ` (${savingsPct.toFixed(1)}%)`}` : 'n.a. — not comparable'}</span>
             </div>
             <div className="print-kpi-card-el">
               <span className="lbl">CO2 Emissions Saved</span>
-              <span className="val" style={{ color: BRANDING.greenColor }}>{co2SavedT.toFixed(3)} Tons</span>
+              <span className="val" style={{ color: BRANDING.greenColor }}>{comparison.energyComparable ? `${co2SavedT.toFixed(3)} Tons` : 'n.a. — not comparable'}</span>
             </div>
           </div>
         </div>
@@ -256,7 +262,7 @@ const PrintReportTemplate = ({ results, projectData }) => {
               </tr>
             </thead>
             <tbody>
-              {(results.bus_diagnostics || []).slice(0, 40).map((diag, idx) => {
+              {(results.bus_diagnostics || []).slice(0, 40).map((diag) => {
                 const isHealthy = diag.status_flag === 'healthy';
                 const isWarning = diag.status_flag === 'warning';
                 const statusColor = isHealthy ? BRANDING.greenColor : (isWarning ? '#d97706' : BRANDING.redColor);
@@ -326,7 +332,7 @@ const PrintReportTemplate = ({ results, projectData }) => {
                     <td style={{ padding: '8px', textAlign: 'right' }}>{d.peak.toFixed(1)}</td>
                     <td style={{ padding: '8px', textAlign: 'right' }}>€{d.cost.toFixed(2)}</td>
                     <td style={{ padding: '8px', textAlign: 'right' }}>€{d.baseCost.toFixed(2)}</td>
-                    <td style={{ padding: '8px', textAlign: 'right', fontWeight: 'bold', color: BRANDING.greenColor }}>€{d.savings.toFixed(2)}</td>
+                    <td style={{ padding: '8px', textAlign: 'right', fontWeight: 'bold', color: BRANDING.greenColor }}>{comparison.energyComparable ? `€${d.savings.toFixed(2)}` : 'n.a.'}</td>
                   </tr>
                 ));
               })()}

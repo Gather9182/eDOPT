@@ -30,6 +30,7 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
   useEffect(() => () => { operationVersion.current += 1; }, []);
   const [activeResultTab, setActiveResultTab] = useState('trips');
   const [currentExcelResult, setCurrentExcelResult] = useState(null);
+  const [distanceReviewed, setDistanceReviewed] = useState(false);
   const [roundWindows, setRoundWindows] = useState(projectData.meta.round_charging_windows || false);
   const [initialSoc, setInitialSoc] = useState((projectData.meta.initial_soc_fraction ?? 1) * 100);
   const [minFinalSoc, setMinFinalSoc] = useState((projectData.meta.min_final_soc_fraction ?? .2) * 100);
@@ -60,6 +61,7 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
     if (!file) return;
 
     setUploadedFile(file);
+    setDistanceReviewed(false);
     setScan(null);
     setInputError('');
     setCurrentExcelResult(null);
@@ -83,6 +85,7 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
   };
 
   const handleSheetChange = async sheet => {
+    setDistanceReviewed(false);
     setInputError('');
     setCurrentExcelResult(null);
     setImportOptions(prev => ({ ...prev, sheet }));
@@ -107,6 +110,7 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
   };
 
   const handleImportOptionsChange = async value => {
+    setDistanceReviewed(false);
     setImportOptions(value);
     setCurrentExcelResult(null);
     // Refresh scans saved before vehicle groups were included, without resetting
@@ -137,9 +141,13 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
       }
       const file = uploadedFile || await loadTimetableSource(projectData.meta.timetable_source_key, getItem);
       const context = { projectData, options: importOptions, selectedDepots, initialSoc, minFinalSoc,
-        file, roundWindows, allNodes, scan, initialFingerprint: initialFingerprint.current };
+        file, roundWindows, allNodes, scan, distanceReviewed, initialFingerprint: initialFingerprint.current };
       const data = await processTimetableDraft(context, processExcel);
       if (version !== operationVersion.current) return;
+      setCurrentExcelResult(data);
+      if (continueToSettings && data.validation_results?.warnings?.some(warning => warning.type === 'DISTANCE_UNIT') && !distanceReviewed) {
+        throw new Error('Review the distance-unit warning below and confirm the interpretation, or choose a different distance rule before continuing.');
+      }
       if (continueToSettings) {
         let nextProject = projectWithTimetable(projectData, data, context);
         const requestedDate = nextProject.meta.price_requested_date;
@@ -188,6 +196,10 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
         </button>
       </div>
       {inputError && <div role="alert" className="card p-4 mb-4 text-error"><AlertCircle size={18} /><span>{inputError}</span></div>}
+      {currentExcelResult?.validation_results?.warnings?.some(warning => warning.type === 'DISTANCE_UNIT') && <div className="card p-4 mb-4 text-warning" role="status">
+        {currentExcelResult.validation_results.warnings.filter(warning => warning.type === 'DISTANCE_UNIT').map((warning,index) => <p key={index}>{warning.message}</p>)}
+        <label className="flex items-center gap-2 mt-3"><input type="checkbox" checked={distanceReviewed} onChange={event => setDistanceReviewed(event.target.checked)} /> I have reviewed the original distance values and confirm this interpretation.</label>
+      </div>}
       <p className="text-sm text-muted mb-4">Hochladen, konfigurieren und „Continue to Settings“ wählen: Der Umlaufplan wird mit allen aktuellen Einstellungen verarbeitet und automatisch ins Projekt übernommen.</p>
       <fieldset disabled={isProcessing || priceBusy} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
       <div className="tab-header mb-6">

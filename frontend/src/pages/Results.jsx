@@ -1,4 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { arrivalComparison } from '../utils/arrivalComparison';
+import SocPolicyResults from '../components/SocPolicyResults';
+import EndConditionResults from '../components/EndConditionResults';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area,
   LineChart, Line, Legend, ReferenceLine, ComposedChart, Brush, ReferenceArea
@@ -171,7 +174,7 @@ const SimulationDatePicker = ({ results, selectedDay, setSelectedDay, setAuditAc
               { label: 'Beginning of Horizon', idx: 0 },
               { label: 'End of Horizon', idx: dailyOverviewData.length - 1 },
               { label: 'Peak Load Event', idx: dailyOverviewData.reduce((p, c, i, a) => c.peakLoad > a[p].peakLoad ? i : p, 0) },
-              { label: 'Highest Savings', idx: dailyOverviewData.reduce((p, c, i, a) => c.dailySavings > a[p].dailySavings ? i : p, 0) },
+              ...(dailyOverviewData.some(day => day.dailySavings !== null) ? [{ label: 'Highest Savings', idx: dailyOverviewData.reduce((p, c, i, a) => c.dailySavings > a[p].dailySavings ? i : p, 0) }] : []),
               { label: 'Most Economical', idx: dailyOverviewData.reduce((p, c, i, a) => c.totalCost < a[p].totalCost ? i : p, 0) },
             ].map((preset) => {
               const isActive = selectedDay === preset.idx;
@@ -1712,6 +1715,7 @@ const Results = () => {
   // Overview Data for Long-Term - optimized to run in O(N) single-pass without array slices
   const dailyOverviewData = useMemo(() => {
     if (!results || !results.is_long_term) return [];
+    const referenceComparable = arrivalComparison(results).energyComparable;
     
     const overviewData = [];
     const totalDays = results.total_days || Math.floor((results.aggregated_load_profile?.length || 0) / pointsPerDay);
@@ -1777,8 +1781,8 @@ const Results = () => {
       const avgSoc = bessCap > 0 ? (sumBessSoc / denominator) / bessCap * 100 : 0;
       const avgTemp = sumTemp / denominator;
       
-      const baselineCost = baselineCostRaw !== 0 ? baselineCostRaw : (totalCost > 0 ? totalCost * 1.15 : totalCost * 0.85);
-      const dailySavings = baselineCost - totalCost;
+      const baselineCost = baselineCostRaw;
+      const dailySavings = referenceComparable ? baselineCost - totalCost : null;
       runningSavings += dailySavings;
       runningCost += totalCost;
 
@@ -1812,15 +1816,15 @@ const Results = () => {
         totalCost: totalCost,
         baselineCost: baselineCost,
         dailySavings: dailySavings,
-        cumulativeSavings: runningSavings,
+        cumulativeSavings: referenceComparable ? runningSavings : null,
         cumulativeCost: runningCost,
         netBalance: -runningCost,
         solarShare: solarShare,
         avgTemp: avgTemp,
         peakLoad: maxLoad,
         peakPv: maxPv,
-        dailyCo2Saved: dailyCo2Saved,
-        cumulativeCo2Savings: runningCo2Savings
+        dailyCo2Saved: referenceComparable ? dailyCo2Saved : null,
+        cumulativeCo2Savings: referenceComparable ? runningCo2Savings : null
       });
     }
 
@@ -2159,17 +2163,13 @@ const Results = () => {
   } : { avg: 0, max: 0, min: 0 };
 
   // Calculate dynamic KPIs against baseline
-  const totalOptimizedCost = results.total_cost_eur;
-  const totalBaselineCost = results.baseline_cost_eur || (results.baseline_aggregated_load_profile?.reduce((acc, load, i) => {
-    const price = (results.electricity_prices || [])[i] || 0;
-    return acc + (load * price * dt);
-  }, 0) / 1000) || totalOptimizedCost * 1.15;
+  const arrivalReference = arrivalComparison(results);
+  const totalBaselineCost = arrivalReference.cost;
 
   const totalBaselineEnergyMwh = results.baseline_aggregated_load_profile 
     ? (results.baseline_aggregated_load_profile.reduce((a, b) => a + b, 0) * dt / 1000)
     : results.total_energy_mwh;
 
-  const savingsPercent = totalBaselineCost > 0 ? ((totalBaselineCost - totalOptimizedCost) / totalBaselineCost) * 100 : 0;
   const recommendedCharges = results.bus_diagnostics?.filter(d => d.is_charged).length || 0;
   
   // Dynamic totals for cards (Day or Global)
@@ -2199,7 +2199,7 @@ const Results = () => {
 
 
 
-  const showGlobalComparison = results.baseline_feasible !== false && (!results.is_long_term || !isDrillDown);
+  const showGlobalComparison = arrivalReference.comparable && (!results.is_long_term || !isDrillDown);
   const stats = [
     { 
       label: isDrillDown ? (results.is_long_term ? `Energy Import (Day ${Number(selectedDay) + 1})` : 'Energy Import') : 'Total Energy Import', 
@@ -2218,7 +2218,7 @@ const Results = () => {
         </>
       ), 
       icon: <DollarSign size={18} />, 
-      delta: showGlobalComparison ? `-${(savingsPercent || 0).toFixed(1)}%` : null,
+      delta: showGlobalComparison && arrivalReference.percent !== null ? `${arrivalReference.percent.toFixed(1)}% savings` : null,
       desc: (isDrillDown && results.is_long_term) ? 'Calculated cost for this specific day based on the optimized schedule.' : 'Total procurement cost. Savings are compared to a standard charge-on-arrival baseline.'
     },
     { 
@@ -2234,7 +2234,7 @@ const Results = () => {
 
   stats.push({
     label: isDrillDown ? (results.is_long_term ? `Daily CO2 Savings (Day ${Number(selectedDay) + 1})` : 'CO2 Emission Savings') : 'CO2 Emission Savings',
-    value: results.baseline_feasible === false ? 'n.a.' : `${co2SavedVal.toFixed(3)} t CO2`,
+    value: !arrivalReference.energyComparable ? 'n.a.' : `${co2SavedVal.toFixed(3)} t CO2`,
     icon: <Leaf size={18} className="text-emerald-500" />,
     desc: isDrillDown 
       ? 'The amount of CO2 emissions saved on this specific day compared to the baseline load profile.' 
@@ -2263,7 +2263,7 @@ const Results = () => {
 
     stats.push({
       label: 'Total Net Savings',
-      value: results.baseline_feasible === false ? 'n.a.' : `€${(totalBaselineCost - totalOptimizedCost).toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
+      value: arrivalReference.savings === null ? 'n.a.' : `€${arrivalReference.savings.toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
       icon: <PiggyBank size={18} className="text-indigo-500" />,
       desc: 'Net financial benefit compared to the charge-on-arrival baseline across the full period.'
     });
@@ -2720,6 +2720,9 @@ const Results = () => {
       
       <ExcludedRoutesNotice ids={results.run_metadata?.excluded_bus_ids} />
       <ChargingSiteResults results={results} day={results.is_long_term && isDrillDown ? selectedDay : null} />
+      <SocPolicyResults policy={results.soc_policy} />
+      <EndConditionResults condition={results.end_condition} />
+      {!arrivalReference.comparable && <p role="status" className="card p-4 mb-4 text-warning">Savings: n.a. {arrivalReference.reason} {results.baseline_issues?.slice(0,3).join(' ')}</p>}
       {results.storage_pruned && (
         <div className="bg-warning/10 border border-warning/20 rounded-2xl p-4 mb-8 animate-in slide-in-from-top-2 duration-500">
           <div className="flex items-start gap-3">
@@ -3709,7 +3712,7 @@ const Results = () => {
                   </div>
                   <div>
                     <div className="text-[10px] text-muted font-bold uppercase flex items-center gap-1">Grid Savings</div>
-                    <div className="font-bold text-sm text-primary">€{currentGridSavings.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                    <div className="font-bold text-sm text-primary">{results.is_long_term && !arrivalReference.energyComparable ? 'n.a.' : `€${currentGridSavings.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</div>
                   </div>
                </div>
             </div>
@@ -3920,7 +3923,7 @@ const Results = () => {
         </div>
       )}
 
-      {isDrillDown && (
+      {isDrillDown && arrivalReference.comparable && (
         <div className="card mb-8">
           <div className="flex justify-between items-center mb-6 h-8">
             <h3 className="text-primary font-bold flex items-center gap-2 text-lg leading-none">

@@ -7,6 +7,7 @@ from .weather_service import WeatherService
 from .feasibility import energy_feasibility_issues
 from .solver_diagnostics import OptimizationFailure
 from .route_feasibility import classify_routes
+from .soc_policy import policy_active
 
 async def run_optimization(inputs: OptimizationInputs) -> OptimizationResult:
     """
@@ -14,7 +15,7 @@ async def run_optimization(inputs: OptimizationInputs) -> OptimizationResult:
     Routes to the scenario-aware MILP solver.
     """
     solver_logs = []
-    energy_issues = energy_feasibility_issues(inputs) if inputs.charging_sites else []
+    energy_issues = energy_feasibility_issues(inputs) if inputs.charging_sites or policy_active(inputs) else []
     if energy_issues:
         raise OptimizationFailure('No feasible charging schedule: ' + '\n'.join(issue['message'] for issue in energy_issues),
             dict(solver_status='Precheck failed', issues=energy_issues, effective_inputs=inputs.model_dump(mode='json'), solver_logs=solver_logs))
@@ -24,7 +25,7 @@ async def run_optimization(inputs: OptimizationInputs) -> OptimizationResult:
         return res
     except Exception as e:
         err_str = str(e)
-        if inputs.charging_sites or inputs.use_charging_sites or any(bus.opportunity_visits for bus in inputs.buses):
+        if policy_active(inputs) or inputs.charging_sites or inputs.use_charging_sites or any(bus.opportunity_visits for bus in inputs.buses):
             # The legacy fallback has no physical connection model. Never
             # return an apparently feasible schedule that ignores site locks.
             diagnostics = getattr(e, 'diagnostics', dict(solver_status='Error', effective_inputs=inputs.model_dump(mode='json'), solver_logs=solver_logs))
@@ -251,6 +252,8 @@ async def run_placeholder_optimization(inputs: OptimizationInputs, solver_logs: 
             max_usable_prof.append(round(bess_cfg.capacity_kwh * cf, 4))
 
     return OptimizationResult(
+        baseline_feasible=False,
+        baseline_issues=['Charge-on-arrival was not validated for this heuristic fallback.'],
         scenario=inputs.scenario,
         total_cost_eur=round(total_cost, 2),
         peak_load_kw=round(float(np.max(grid_import)), 2),

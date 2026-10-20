@@ -1,11 +1,14 @@
 import React, { useState, useEffect } from 'react';
+import {arrivalComparison} from '../utils/arrivalComparison';
 import { 
-  Download, FileText, Table as TableIcon, Share2, 
-  AlertCircle, ChevronRight, Play, Loader2, Sparkles, CheckCircle2, ShieldAlert, Palette
+  Download, Table as TableIcon, Share2, Archive,
+  AlertCircle, ChevronRight, Loader2, Sparkles, CheckCircle2, Palette
 } from 'lucide-react';
 import { getItem } from '../utils/db';
 import { exportExcel } from '../services/api';
 import { BRANDING } from '../components/PrintReportTemplate';
+import { resultAnalysisFiles } from '../utils/resultAnalysisExport';
+import { diagnosticZip } from '../utils/diagnosticExport';
 
 const getFormattedFilename = (results, ext) => {
   if (!results) return `eDOPT_baseline-Shortterm_010126.${ext}`;
@@ -47,6 +50,8 @@ const Export = ({ projectData }) => {
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(null); // 'excel', 'csv', 'json', 'pdf'
   const [downloadSuccess, setDownloadSuccess] = useState(null);
+  const [zipError,setZipError] = useState('');
+  const [zipNotice,setZipNotice] = useState('');
 
   useEffect(() => {
     const loadResults = async () => {
@@ -73,10 +78,10 @@ const Export = ({ projectData }) => {
     setDownloading('excel');
     try {
       // Append co2 factor dynamically from projectData config if not stored in metadata
-      const payload = { ...results };
+      const payload = JSON.parse(JSON.stringify(results));
       if (!payload.run_metadata) payload.run_metadata = {};
       if (!payload.run_metadata.inputs) payload.run_metadata.inputs = {};
-      payload.run_metadata.inputs.co2_emission_factor = projectData.meta?.co2_emission_factor ?? 400.0;
+      payload.run_metadata.inputs.co2_emission_factor ??= results.run_metadata?.audit_context?.project?.meta?.co2_emission_factor ?? projectData.meta?.co2_emission_factor ?? 400.0;
       
       const blob = await exportExcel(payload);
       
@@ -175,6 +180,34 @@ const Export = ({ projectData }) => {
     }
   };
 
+  const handleDownloadAnalysis = async () => {
+    if (!results || downloading) return;
+    setDownloading('analysis');
+    setZipError('');
+    setZipNotice('');
+    try {
+      await new Promise(resolve => setTimeout(resolve,0));
+      const now = new Date();
+      const {files,manifest} = await resultAnalysisFiles(results,projectData,getItem,
+        {browser:navigator.userAgent,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,
+          language:navigator.language,frontend_mode:import.meta.env.MODE},now);
+      const url = URL.createObjectURL(diagnosticZip(files,now));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = getFormattedFilename(results,'analysis.zip');
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url),1000);
+      setZipNotice(manifest.missing_information.length
+        ? `Analysis ZIP exported with ${manifest.missing_information.length} missing-information ${manifest.missing_information.length === 1 ? 'note' : 'notes'}. See README.txt and manifest.json for details.`
+        : `Analysis ZIP exported: ${files.length} files with results, original run inputs, settings and source data.`);
+      triggerSuccessAlert('analysis');
+    } catch (error) {
+      setZipError(`Analysis export failed: ${error.message}`);
+    } finally { setDownloading(null); }
+  };
+
 
 
   if (loading) {
@@ -208,10 +241,9 @@ const Export = ({ projectData }) => {
   // Active run stats
   const scenario = results.scenario || 'baseline';
   const isLongTerm = results.is_long_term || false;
-  const cost = results.total_cost_eur || 0.0;
-  const baseCost = results.baseline_cost_eur || 0.0;
-  const savings = baseCost - cost;
-  const savingsPct = baseCost > 0 ? (savings / baseCost) * 100 : 0.0;
+  const comparison = arrivalComparison(results);
+  const savings = comparison.savings;
+  const savingsPct = comparison.percent;
   const peak = results.peak_load_kw || 0.0;
   
   const co2Factor = projectData.meta?.co2_emission_factor ?? 400.0;
@@ -225,6 +257,11 @@ const Export = ({ projectData }) => {
   const co2SavedT = baseCo2EmissionsT - co2EmissionsT;
 
   const exportOptions = [
+    {
+      id:'analysis',title:'Complete Analysis Package',format:'ZIP',icon:<Archive size={24} />,
+      desc:'All stored results, run settings, exact archived solver requests, imported routes, exclusions, charging sites, mappings, original Excel files where available, logs and detailed CSV tables. Includes a README and completeness manifest.',
+      action:handleDownloadAnalysis,
+    },
     { 
       id: 'excel',
       title: 'Formatted Excel Spreadsheet', 
@@ -276,15 +313,19 @@ const Export = ({ projectData }) => {
                 <span className="metadata-value capitalize">{scenario.replace('_', ' ')}</span>
               </div>
               <div className="metadata-item">
+                <span className="metadata-label">Bus end condition</span>
+                <span className="metadata-value">{results.end_condition?.mode === 'cyclic_soc' ? 'Start SoC = End SoC' : results.end_condition?.mode === 'next_day_readiness' ? 'Next-Day Readiness' : results.end_condition?.mode === 'end_reserve' ? 'Minimum end reserve' : 'Not recorded'}</span>
+              </div>
+              <div className="metadata-item">
                 <span className="metadata-label">Total Savings</span>
                 <span className="metadata-value success">
-                  €{savings.toLocaleString(undefined, { maximumFractionDigits: 2 })} ({savingsPct.toFixed(1)}%)
+                  {comparison.comparable ? `€${savings.toLocaleString(undefined, {maximumFractionDigits:2})}${savingsPct === null ? '' : ` (${savingsPct.toFixed(1)}%)`}` : 'n.a. — not comparable'}
                 </span>
               </div>
               <div className="metadata-item">
                 <span className="metadata-label">CO2 Reductions</span>
                 <span className="metadata-value success">
-                  {co2SavedT.toFixed(3)} t CO2
+                  {comparison.energyComparable ? `${co2SavedT.toFixed(3)} t CO2` : 'n.a. — not comparable'}
                 </span>
               </div>
               <div className="metadata-item">
@@ -304,7 +345,7 @@ const Export = ({ projectData }) => {
           
           <div className="flex items-center gap-2 text-xs text-secondary bg-app/50 p-3 rounded-lg border border-border mt-4">
             <CheckCircle2 size={16} className="text-success flex-shrink-0" />
-            <span>This dataset matches the parameters configured in the <b>Model Parameters</b> dashboard.</span>
+            <span>Results belong to the saved run. Current project settings may differ; the analysis ZIP identifies both snapshots separately.</span>
           </div>
         </div>
 
@@ -343,7 +384,9 @@ const Export = ({ projectData }) => {
       </div>
 
       {/* Grid of Export Options */}
-      <div className="grid grid-cols-3 gap-6">
+      {zipError && <p role="alert" className="text-error mb-4">{zipError}</p>}
+      {zipNotice && <p role="status" className="text-sm text-secondary mb-4">{zipNotice}</p>}
+      <div className="grid gap-6" style={{gridTemplateColumns:'repeat(auto-fit,minmax(min(100%,360px),1fr))'}}>
         {exportOptions.map((opt) => {
           const isDownloadingThis = downloading === opt.id;
           const isSuccessThis = downloadSuccess === opt.id;

@@ -53,4 +53,4 @@ async def classify_routes(inputs, findings=(), budget_seconds=20):
                            reason='Every route is feasible alone, but the joint model is infeasible. This route receives a shortfall in one diagnostic allocation; it is not a unique cause.')
     return dict(routes=[rows[bus.id] for bus in inputs.buses], all_individually_feasible=all_individually_feasible,
         completed=all(row['status'] != 'not_determined' for row in rows.values()), time_budget_seconds=budget_seconds,
-        scope='Same failed request and scenario, one route at a time, no competition and no heuristic fallback. Feasibility is conditional on these inputs; no separate 24-hour SoC-cycle or reference-Excel equivalence is claimed.')
+        scope='Same failed request and scenario, one route at a time, no competition and no heuristic fallback. Feasibility includes the end-condition mode in the failed request (including cyclic bus SoC when enabled). No reference-Excel equivalence is claimed.')

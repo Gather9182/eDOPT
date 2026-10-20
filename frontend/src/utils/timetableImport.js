@@ -81,6 +81,7 @@ export function projectWithTimetable(project, data, context) {
     })),
     meta: { ...project.meta, data_source: 'uploaded', import_settings: context.options,
       excluded_bus_ids: [],
+      distance_review_confirmed: Boolean(context.distanceReviewed),
       timetable_nodes: context.allNodes, selected_depot_nodes: context.selectedDepots,
       timetable_scan: context.scan, round_charging_windows: context.roundWindows,
       opportunity_import_signature: JSON.stringify(resolvedOpportunityConfig(project)),

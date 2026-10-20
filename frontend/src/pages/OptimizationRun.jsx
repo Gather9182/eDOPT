@@ -1,4 +1,5 @@
 import CustomSelect from '../components/CustomSelect';
+import {socPolicyInputs, socPolicyIssues, mergeSocPolicies, endConditionPatch, endConditionIssues} from '../utils/socPolicy';
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Zap, Terminal, Battery, Clock, CheckCircle, AlertCircle, Loader2, Table as TableIcon, Info, Save, ChevronDown, ChevronUp, Sun, Layers, LayoutDashboard, Activity, Sliders, MapPin, Navigation } from 'lucide-react';
 import { runOptimization as callOptimizeApi, validateInputs, API_BASE } from '../services/api';
@@ -11,6 +12,7 @@ import ValidationStatusPanel from '../components/ValidationStatusPanel';
 import OptimizationFailurePanel from '../components/OptimizationFailurePanel';
 import { inputsWithRealizedVisits, resolvedOpportunityConfig, opportunityImportNeedsRefresh } from '../utils/opportunity';
 import { captureValidationContext, validationDiagnostic, optimizationDiagnostic, diagnosticClone, diagnosticFiles, diagnosticZip } from '../utils/diagnosticExport';
+import { archiveChunkRequest, runAuditMetadata } from '../utils/resultAnalysisExport';
 
 const InfoTooltip = ({ title, text, align = 'center' }) => (
   <div className="tooltip-container">
@@ -63,6 +65,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
   const [showGeographicSettings, setShowGeographicSettings] = useState(false);
   const [localSettings, setLocalSettings] = useState({
+    ...socPolicyInputs(projectData.constraints || {}),
     charger_capacity_kw: projectData.constraints?.charger_capacity_kw || 1200,
     grid_limit_kw: projectData.constraints?.grid_limit_kw || 800,
     efficiency: projectData.constraints?.efficiency || 0.92,
@@ -71,7 +74,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     planning_horizon: projectData.meta?.planning_horizon || 24,
     time_resolution: projectData.meta?.time_resolution || 15,
     num_chargers: projectData.constraints?.num_chargers || 50,
-    use_next_day_readiness: projectData.constraints?.use_next_day_readiness ?? true
+    use_next_day_readiness: projectData.constraints?.use_cyclic_soc ? false : projectData.constraints?.use_next_day_readiness ?? true
   });
   const [validationState, setValidationState] = useState(null);
   const [isExportingDiagnostic, setIsExportingDiagnostic] = useState(false);
@@ -79,6 +82,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
   const [optimizationError, setOptimizationError] = useState(null);
   const [optimizationFailure, setOptimizationFailure] = useState(null);
   const optimizationAttemptRef = useRef(null);
+  const analysisRunRef = useRef(null);
   const logsRef = useRef([]);
   const validationVersionRef = useRef(0);
   const [isValidating, setIsValidating] = useState(false);
@@ -102,6 +106,13 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
   const validationResult = validationState?.key === validationKeyFor(activeBuses) ? validationState.result : null;
   const excludableIds = excludableBusIds(validationResult, activeBuses);
   const noActiveBuses = projectData.buses.length > 0 && !activeBuses.length;
+  const updateSocSettings = patch => {
+    patch = endConditionPatch(patch);
+    const policy = {...socPolicyInputs(localSettings), ...patch};
+    setLocalSettings(previous => ({...previous, ...policy}));
+    setProjectData(previous => ({...previous, constraints:{...previous.constraints, ...policy},
+      meta:policy.use_cyclic_soc ? {...previous.meta,planning_horizon:24} : previous.meta}));
+  };
 
   // Sync to project meta when it changes (e.g. after Excel import)
   useEffect(() => {
@@ -110,12 +121,20 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         ...prev,
         planning_horizon: projectData.meta.planning_horizon || 24,
         time_resolution: projectData.meta.time_resolution || 15,
+      }));
+    }
+  }, [projectData.meta.data_source, projectData.meta.planning_horizon, projectData.meta.time_resolution]);
+
+  useEffect(() => {
+    if (projectData.meta.data_source === 'uploaded') {
+      setLocalSettings(prev => ({
+        ...prev,
         charger_capacity_kw: projectData.constraints.charger_capacity_kw,
         grid_limit_kw: projectData.constraints.grid_limit_kw,
         num_chargers: projectData.constraints.num_chargers || 50
       }));
     }
-  }, [projectData.meta.data_source, projectData.meta.planning_horizon, projectData.meta.time_resolution, projectData.constraints]);
+  }, [projectData.meta.data_source, projectData.constraints.charger_capacity_kw, projectData.constraints.grid_limit_kw, projectData.constraints.num_chargers]);
 
   const handleGetCurrentLocation = () => {
     if ("geolocation" in navigator) {
@@ -232,9 +251,14 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     activeBuses.map(bus => bus.id));
 
   const requestOptimization = async (inputs, attempt = {}) => {
-    optimizationAttemptRef.current = {context:failureContext(),request:diagnosticClone(inputs),
+    optimizationAttemptRef.current = {context:{...(analysisRunRef.current?.context || failureContext()),checked_at:new Date().toISOString()},request:diagnosticClone(inputs),
       attempt:{scenario:inputs.scenario,mode:simulationMode,...attempt}};
     const result = await callOptimizeApi(inputs);
+    if (attempt.chunk_number && analysisRunRef.current) {
+      const record = await archiveChunkRequest(optimizationAttemptRef.current.request,attempt,analysisRunRef.current.id,setItem,result);
+      analysisRunRef.current.requests.push(record);
+      if (record.status !== 'stored') addLog(`Analysis archive warning: Exact inputs for chunk ${attempt.chunk_number} could not be saved: ${record.error}`);
+    }
     optimizationAttemptRef.current = null;
     return result;
   };
@@ -301,6 +325,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         return {
           scenario: targetScenario,
           ...chargingInputs(projectData),
+          ...socPolicyInputs(localSettings),
           planning_horizon_hours: localSettings.planning_horizon,
           time_step_minutes: localSettings.time_resolution,
           buses: activeBuses.map(bus => {
@@ -341,6 +366,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         return {
           scenario: targetScenario,
           planning_horizon_hours: 24,
+          ...socPolicyInputs(localSettings),
           time_step_minutes: 15,
           buses: Array.from({ length: 42 }, (_, i) => ({
             id: `Bus_${String(i+1).padStart(3, '0')}`,
@@ -386,6 +412,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             ...result,
             run_metadata: {
               ...fleetRunMetadata(projectData),
+              ...runAuditMetadata(analysisRunRef.current?.context,validationState?.diagnostic,logsRef.current),
+              request_inputs:diagnosticClone(inputs),
               inputs: JSON.parse(JSON.stringify(inputsWithRealizedVisits(inputs, result))),
               timestamp: new Date().toISOString(),
               run_id: `${new Date().toISOString().split('T')[0]}_BATCH_${s.toUpperCase()}`
@@ -425,6 +453,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           ...result,
           run_metadata: {
             ...fleetRunMetadata(projectData),
+            ...runAuditMetadata(analysisRunRef.current?.context,validationState?.diagnostic,logsRef.current),
+            request_inputs:diagnosticClone(inputs),
             inputs: JSON.parse(JSON.stringify(inputsWithRealizedVisits(inputs, result))),
             timestamp: new Date().toISOString(),
             run_id: `${new Date().toISOString().split('T')[0]}_${Math.random().toString(36).substr(2, 5).toUpperCase()}`
@@ -447,6 +477,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     setOptimizationFailure(null);
     setDiagnosticExportError('');
     optimizationAttemptRef.current = null;
+    analysisRunRef.current = {id:crypto.randomUUID(),context:failureContext(),requests:[]};
     if (simulationMode === 'single') {
       await runOptimization();
     } else {
@@ -535,6 +566,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       const aggConnections = {}, aggSiteLoads = {}, aggSiteGrids = {}, aggOccupied = {};
       const aggVisitEnergy = {}, aggAdditionalTrips = {}, aggVisits = [];
       const baselineIssues = new Set();
+      const chunkSocPolicies = [];
       const appendProfiles = (target, source) => Object.entries(source || {}).forEach(([key, values]) => { (target[key] ||= []).push(...values); });
       let totalCost = 0;
       let totalBaselineCost = 0;
@@ -582,6 +614,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           return {
             scenario: scenario,
             ...chargingInputs(projectData),
+            ...socPolicyInputs(localSettings),
+            horizon_start_minute: startIdx * localSettings.time_resolution,
             cyclic_connections: false,
             planning_horizon_hours: chunkPeriods * localSettings.time_resolution / 60,
             time_step_minutes: localSettings.time_resolution,
@@ -638,6 +672,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         appendProfiles(aggSiteGrids, res.site_grid_import_profiles);
         appendProfiles(aggOccupied, res.site_occupied_connectors);
         (res.baseline_issues || []).forEach(issue => baselineIssues.add(issue));
+        if (res.soc_policy?.min_mode) chunkSocPolicies.push(res.soc_policy);
         
         // Extract states for next chunk
         if (res.bess_soc_profile && res.bess_soc_profile.length > 0) {
@@ -780,6 +815,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
 
       // 4. Construct flat payload matching standard format
       const finalPayload = {
+        soc_policy: mergeSocPolicies(chunkSocPolicies),
         opportunity_charging_visits: aggVisits,
         additional_trip_energy_profiles: aggVisitEnergy,
         additional_trips: aggAdditionalTrips,
@@ -827,6 +863,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         total_days: totalDays,
         run_metadata: {
             ...fleetRunMetadata(projectData),
+            ...runAuditMetadata(analysisRunRef.current?.context,validationState?.diagnostic,logsRef.current,analysisRunRef.current?.requests || []),
+            run_id:analysisRunRef.current?.id,
             timestamp: new Date().toISOString(),
             scenario: scenario,
             is_long_term: true,
@@ -834,6 +872,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             settings: { ...localSettings, longTermConfig },
             inputs: {
                 ...chargingInputs(projectData),
+                ...socPolicyInputs(localSettings),
                 grid_limit_kw: localSettings.grid_limit_kw,
                 num_chargers: localSettings.num_chargers,
                 initial_soc_fraction: 1.0,
@@ -902,6 +941,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     const recordValidation = (result, request = null, origin = 'backend', transportError = null) => {
       setValidationState({ key, result, diagnostic:validationDiagnostic(context, result, request, origin, transportError) });
     };
+    const policyIssues = [...socPolicyIssues(localSettings), ...endConditionIssues(localSettings, simulationMode)];
+    if (policyIssues.length) {
+      recordValidation({status:'invalid',issues:policyIssues}, null, 'frontend');
+      setIsValidating(false);
+      return;
+    }
     if (opportunityImportNeedsRefresh(projectData)) {
       recordValidation({status:'invalid',issues:[{type:'ERROR',code:'TIMETABLE_REPROCESS_REQUIRED',category:'infrastructure',message:'The mapping or additional charging trip settings have changed. Reprocess the timetable under Input Data using Continue to Settings.'}]}, null, 'frontend');
       setIsValidating(false);
@@ -920,6 +965,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       inputs = {
         scenario: scenario,
         ...chargingInputs(projectData),
+        ...socPolicyInputs(localSettings),
         planning_horizon_hours: validationHours,
         cyclic_connections: simulationMode === 'single',
         time_step_minutes: localSettings.time_resolution,
@@ -1410,7 +1456,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                       type="number"
                       className="form-input h-9 text-xs"
                       value={localSettings.planning_horizon}
-                      disabled={simulationMode === 'long_term'}
+                      disabled={simulationMode === 'long_term' || localSettings.use_cyclic_soc}
                       onChange={(e) => setLocalSettings(prev => ({ ...prev, planning_horizon: Number(e.target.value) }))}
                     />
                   </div>
@@ -1476,7 +1522,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                   </div>
                   <div className="flex h-9 items-center">
                     <button 
-                      onClick={() => setLocalSettings(prev => ({ ...prev, use_next_day_readiness: !prev.use_next_day_readiness }))}
+                      disabled={localSettings.use_cyclic_soc}
+                      onClick={() => updateSocSettings({use_next_day_readiness: !localSettings.use_next_day_readiness})}
                       className={`chart-toggle-pill ${localSettings.use_next_day_readiness ? 'active' : ''}`}
                       style={{ '--pill-color': 'var(--primary)', width: 'full', height: '36px', padding: '0 12px', flex: 1 }}
                     >
@@ -1488,6 +1535,10 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
               <p className="text-xxs text-muted opacity-40 uppercase tracking-tight mt-1 px-1">
                 Guarantees charge for tomorrow's first shifts.
               </p>
+              <label className="flex items-center gap-2 mt-4"><input type="checkbox" checked={localSettings.use_cyclic_soc}
+                disabled={!localSettings.use_cyclic_soc && (simulationMode !== 'single' || Number(localSettings.planning_horizon) !== 24)}
+                onChange={e => updateSocSettings({use_cyclic_soc:e.target.checked})} /> Start SoC = End SoC</label>
+              <p className="text-sm text-muted mt-2">Each bus must finish the repeated 24-hour day with exactly its initial battery energy. Replaces Next-Day Readiness; the separate end reserve still applies. Bus batteries only, not BESS. Available for 24-hour Short-Term runs.</p>
             </div>
 
             <div className="card shadow-sm">
@@ -1535,6 +1586,23 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                   />
                 </div>
               </div>
+            </div>
+
+            <div className="card shadow-sm">
+              <h3 className="card-title text-primary">Operating SoC limits</h3>
+              <p className="text-sm text-muted mb-3">Independent of the end-of-day reserve and Next-Day Readiness. Disabled options preserve the existing behaviour. These limits are saved automatically. Restore excluded routes to reassess them under changed limits.</p>
+              <label className="flex items-center gap-2 mb-3"><input type="checkbox" checked={localSettings.operating_min_soc_mode !== 'off'} onChange={e => updateSocSettings({operating_min_soc_mode:e.target.checked ? 'soft' : 'off'})} /> Enable operating minimum SoC</label>
+              <fieldset disabled={localSettings.operating_min_soc_mode === 'off'} style={{opacity:localSettings.operating_min_soc_mode === 'off' ? .45 : 1,border:0,padding:0,minWidth:0,alignItems:'end',gridTemplateColumns:'minmax(0,1fr) minmax(0,2fr)'}} className="grid gap-4 mb-4">
+                <label>Minimum SoC (%)<input aria-label="Operating minimum SoC (%)" type="number" min="0" max="100" step="1" className="form-input" value={localSettings.operating_min_soc_fraction * 100} onChange={e => updateSocSettings({operating_min_soc_fraction:Number(e.target.value)/100})} /></label>
+                <label>Minimum mode<CustomSelect aria-label="Operating minimum mode" className="form-input" value={localSettings.operating_min_soc_mode === 'off' ? 'soft' : localSettings.operating_min_soc_mode} onChange={e => updateSocSettings({operating_min_soc_mode:e.target.value})}><option value="soft">Soft — relax only when necessary</option><option value="hard">Hard — never go below the limit</option></CustomSelect></label>
+              </fieldset>
+              <label className="flex items-center gap-2 mb-3"><input type="checkbox" checked={localSettings.operating_max_soc_enabled} onChange={e => updateSocSettings({operating_max_soc_enabled:e.target.checked})} /> Enable operating maximum SoC</label>
+              <fieldset disabled={!localSettings.operating_max_soc_enabled} style={{opacity:localSettings.operating_max_soc_enabled ? 1 : .45,border:0,padding:0,margin:0,minWidth:0,alignItems:'end',gridTemplateColumns:'minmax(0,1fr) minmax(0,2fr)'}} className="grid gap-4 mb-4">
+                <label>Maximum SoC (%)<input aria-label="Operating maximum SoC (%)" type="number" min="0" max="100" step="1" className="form-input" value={localSettings.operating_max_soc_fraction * 100} onChange={e => updateSocSettings({operating_max_soc_fraction:Number(e.target.value)/100})} /></label>
+                <label>Maximum mode<CustomSelect aria-label="Operating maximum mode" className="form-input" value={localSettings.operating_max_soc_mode} onChange={e => updateSocSettings({operating_max_soc_mode:e.target.value})}><option value="soft">Soft — relax only when necessary</option><option value="hard">Hard — never exceed the limit</option></CustomSelect></label>
+              </fieldset>
+              {localSettings.operating_max_soc_enabled && localSettings.operating_max_soc_mode === 'hard' && <p className="text-sm text-muted mt-2">Hard maximum applies to every modelled battery state, including the initial SoC. Conflicting initial charge or end targets are reported as errors.</p>}
+              <p className="text-sm text-muted mt-3">Soft limits may be relaxed only as needed for feasibility. The solver first minimises total deviations, then electricity cost. Min and max deviations have equal weight. Absolute battery bounds remain 0–100%; two solver stages may increase runtime.</p>
             </div>
 
             <div className="card shadow-sm">
@@ -1918,6 +1986,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
               ].map(mode => (
                 <button
                   key={mode.id}
+                  disabled={mode.id === 'long_term' && localSettings.use_cyclic_soc}
+                  title={mode.id === 'long_term' && localSettings.use_cyclic_soc ? 'Disable Start SoC = End SoC before switching to Long-Term.' : undefined}
                   onClick={() => {
                     setSimulationMode(mode.id);
                     if (mode.id === 'long_term' && scenario === 'compare_all') {

@@ -6,6 +6,7 @@ from .services.price_service import PriceService, AWattarProvider
 from .utils.excel_processor import process_umlauf_excel, scan_umlauf_excel
 from .services.charging_sites import validate_sites
 from .services.feasibility import energy_feasibility_issues
+from .services.soc_policy import policy_active
 from .services.opportunity_charging import possible_availability
 from fastapi import UploadFile, File, Form
 from datetime import datetime, timezone
@@ -172,7 +173,7 @@ async def validate_inputs(inputs: OptimizationInputs, include_diagnostics: bool 
         if inputs.pv_config.capacity_kw <= 0:
             issues.append({"type": "WARNING", "message": "PV: Peak power is 0 or negative, but a PV scenario is selected."})
 
-    if inputs.charging_sites and not any(issue["type"] == "ERROR" for issue in issues):
+    if (inputs.charging_sites or policy_active(inputs)) and not any(issue["type"] == "ERROR" for issue in issues):
         issues.extend(energy_feasibility_issues(inputs))
 
     if any(issue["type"] == "ERROR" for issue in issues):

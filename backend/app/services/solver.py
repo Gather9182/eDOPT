@@ -8,21 +8,28 @@ from .pv_service import PVService
 from .weather_service import WeatherService
 from .charging_sites import add_site_constraints, site_results, validate_sites, simulate_site_baseline
 from .opportunity_charging import add_opportunity_variables, link_visit_charging, opportunity_results, possible_availability
-from .solver_diagnostics import solve_with_diagnostics
+from .soc_policy import solve_soc_policy, soc_policy_results, preferred_maximum, minimum_energy, reference_policy_issues
+from .end_conditions import end_target, add_end_condition, reference_end_issues, end_condition_results
 
-def simulate_baseline_load(inputs: OptimizationInputs) -> np.ndarray:
+def simulate_baseline_load(inputs: OptimizationInputs, with_issues=False, minimum_soc_deviation=None):
     """
     Simulates a 'Charge on Arrival' heuristic while respecting depot constraints.
     Used for comparing optimization results against a standard greedy strategy.
     """
     if inputs.charging_sites:
-        return simulate_site_baseline(inputs)[0]
+        result = simulate_site_baseline(inputs, minimum_soc_deviation)
+        return result if with_issues else result[0]
     num_periods = len(inputs.electricity_prices)
     delta_t = inputs.time_step_minutes / 60.0
     baseline_load = np.zeros(num_periods)
     
     # Start with the same initial SoC used in the optimization
     bus_socs = [float(bus.initial_soc_kwh) for bus in inputs.buses]
+    profiles = {bus.id: [bus.initial_soc_kwh] for bus in inputs.buses}
+    issues = []
+    for i, bus in enumerate(inputs.buses):
+        if inputs.operating_min_soc_mode == 'hard' and bus_socs[i] < minimum_energy(inputs, bus) - .001:
+            issues.append(f'Bus {bus.id}: arrival reference violates the operating minimum SoC at the initial state.')
     
     for t in range(num_periods):
         current_step_grid_kw = 0.0
@@ -35,7 +42,7 @@ def simulate_baseline_load(inputs: OptimizationInputs) -> np.ndarray:
             
             # Check availability and appetite
             is_available = bus.availability[t] == 1
-            is_hungry = bus_socs[i] < (bus.max_battery_capacity_kwh - 0.1)
+            is_hungry = bus_socs[i] < (preferred_maximum(inputs, bus) - 0.1)
             
             if is_available and is_hungry:
                 # Depot constraints
@@ -45,10 +52,10 @@ def simulate_baseline_load(inputs: OptimizationInputs) -> np.ndarray:
                 if has_socket and has_grid_room:
                     # Power calculation
                     max_bus_kw = bus.max_power_kw
-                    needed_kwh = (bus.max_battery_capacity_kwh - bus_socs[i])
+                    needed_kwh = (preferred_maximum(inputs, bus) - bus_socs[i])
                     needed_kw = needed_kwh / (delta_t * bus.efficiency)
                     
-                    remaining_grid_kw = max(0.0, inputs.grid_limit_kw - current_step_grid_kw)
+                    remaining_grid_kw = max(0.0, min(inputs.grid_limit_kw, inputs.charger_capacity_kw) - current_step_grid_kw)
                     allowable_kw = min(max_bus_kw, needed_kw, remaining_grid_kw)
                     
                     if allowable_kw > 1.0:
@@ -59,9 +66,16 @@ def simulate_baseline_load(inputs: OptimizationInputs) -> np.ndarray:
                         current_step_chargers += 1
             
             # Update SoC for consumption (same interval as charging)
-            bus_socs[i] = max(0.0, bus_socs[i] - trip_energy)
+            bus_socs[i] -= trip_energy
+            profiles[bus.id].append(bus_socs[i])
+            floor = minimum_energy(inputs, bus) if inputs.operating_min_soc_mode == 'hard' else 0
+            if bus_socs[i] < floor - .001:
+                issues.append(f'Bus {bus.id}: arrival reference violates the battery/operating minimum at period {t}.')
             
-    return baseline_load
+    for i, bus in enumerate(inputs.buses):
+        issues.extend(reference_end_issues(inputs, bus, bus_socs[i]))
+    issues.extend(reference_policy_issues(inputs, profiles, minimum_soc_deviation))
+    return (baseline_load, sorted(set(issues))) if with_issues else baseline_load
 
 def _validate_bus_inputs(inputs: OptimizationInputs):
     validate_sites(inputs)
@@ -200,7 +214,7 @@ async def run_scenario_optimization(inputs: OptimizationInputs, solver_logs: Lis
     try:
         basic_res = await run_milp_solver(basic_baseline_inputs)
     except RuntimeError:
-        if not inputs.charging_sites:
+        if not inputs.charging_sites and not inputs.use_cyclic_soc:
             raise
         basic_res = None
         solver_logs.append('The grid-only comparison is infeasible for these locations. Solving the requested PV/BESS scenario independently.')
@@ -375,8 +389,7 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
             ), f'soc_balance_b{bi}_t{t}'
             prob += (p_vars[(bus.id, t)] <= bus.max_power_kw * z_vars[(bus.id, t)])
         
-        final_threshold = bus.min_final_soc_kwh + (bus.next_day_required_energy_kwh if getattr(inputs, 'use_next_day_readiness', False) else 0)
-        prob += (soc_vars[(bus.id, num_periods)] >= final_threshold), f'final_soc_b{bi}'
+        add_end_condition(prob, inputs, bus, soc_vars[(bus.id, num_periods)], bi)
 
     # 2. PV Constraints
     for t in range(num_periods):
@@ -428,7 +441,7 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
     if site_state:
         link_visit_charging(prob, inputs, opportunities, site_state[0], site_state[1], soc_vars)
     # --- Solve ---
-    solve_with_diagnostics(prob, inputs, solver_logs)
+    minimum_soc_deviation = solve_soc_policy(prob, inputs, soc_vars, solver_logs)
     status = pulp.LpStatus[prob.status]
 
     # --- Extract Results ---
@@ -483,7 +496,7 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
     total_energy_kwh = sum(import_prof) * delta_t
     
     # Baseline comparison (Charge on arrival)
-    baseline_load = simulate_baseline_load(inputs)
+    baseline_load, baseline_issues = simulate_baseline_load(inputs, with_issues=True, minimum_soc_deviation=minimum_soc_deviation)
     baseline_cost = sum(baseline_load[t] * (inputs.electricity_prices[t] / 1000.0) * delta_t for t in range(num_periods))
 
     # Diagnostics (Simplified reuse)
@@ -494,7 +507,7 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
         min_reached = min(soc_profiles[bus.id])
         charged_to_bat = sum(schedules[bus.id][t] * delta_t * bus.efficiency for t in range(num_periods))
         
-        final_threshold = bus.min_final_soc_kwh + (bus.next_day_required_energy_kwh if getattr(inputs, 'use_next_day_readiness', False) else 0)
+        final_threshold = end_target(inputs, bus)
         
         if charged_to_bat < 0.1:
             reason = "No charging required: Initial SoC sufficient for all trips."
@@ -516,11 +529,14 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
             total_charged_energy_kwh=charged_to_bat,
             is_charged=charged_to_bat > 0.1,
             status_flag=status,
-            diagnostic_reason=reason
+            diagnostic_reason=reason, target_initial_soc_kwh=bus.initial_soc_kwh,
+            target_min_final_soc_kwh=end_target(inputs, bus),
+            next_day_required_energy_kwh=bus.next_day_required_energy_kwh if inputs.use_next_day_readiness else 0
         ))
 
-    baseline_issues = simulate_site_baseline(inputs)[1] if inputs.charging_sites else []
     return OptimizationResult(
+        soc_policy=soc_policy_results(inputs, soc_profiles, minimum_soc_deviation),
+        end_condition=end_condition_results(inputs, soc_profiles),
         **visit_results,
         **site_results(inputs, site_state),
         baseline_feasible=not baseline_issues,
@@ -595,10 +611,7 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
             trip_energy = float(bus.trip_energy_profile_kwh[t])+opportunities['energy'].get((bus.id,t),0)
             prob += (soc_vars[(bus.id, t + 1)] == soc_vars[(bus.id, t)] + p_vars[(bus.id, t)] * delta_t * bus.efficiency - trip_energy), f'soc_balance_b{bi}_t{t}'
             prob += (p_vars[(bus.id, t)] <= bus.max_power_kw * z_vars[(bus.id, t)])
-        final_threshold = bus.min_final_soc_kwh
-        if getattr(inputs, 'use_next_day_readiness', False):
-            final_threshold += bus.next_day_required_energy_kwh
-        prob += (soc_vars[(bus.id, num_periods)] >= final_threshold), f'final_soc_b{bi}'
+        add_end_condition(prob, inputs, bus, soc_vars[(bus.id, num_periods)], bi)
 
     for t in range(num_periods):
         prob += (pulp.lpSum(p_vars[(bus.id, t)] for bus in inputs.buses) <= inputs.grid_limit_kw), f'global_grid_t{t}'
@@ -609,7 +622,7 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
     site_state = add_site_constraints(prob, inputs, p_vars, opportunities=opportunities)
     if site_state:
         link_visit_charging(prob, inputs, opportunities, site_state[0], site_state[1], soc_vars)
-    solve_with_diagnostics(prob, inputs, solver_logs)
+    minimum_soc_deviation = solve_soc_policy(prob, inputs, soc_vars, solver_logs)
     status = pulp.LpStatus[prob.status]
 
     schedules = {}
@@ -628,7 +641,7 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
         total_trip_energy = sum(bus.trip_energy_profile_kwh)+sum(visit_results.get('additional_trip_energy_profiles',{}).get(bus.id,[]))
         charged_en = sum(bus_sch[t] * delta_t * bus.efficiency for t in range(num_periods))
         min_soc = min(bus_soc)
-        final_threshold = bus.min_final_soc_kwh + (bus.next_day_required_energy_kwh if getattr(inputs, 'use_next_day_readiness', False) else 0)
+        final_threshold = end_target(inputs, bus)
         
         if charged_en < 0.1:
             reason = "No charging required: Initial SoC sufficient for all trips."
@@ -644,18 +657,21 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
             id=bus.id, capacity_kwh=bus.max_battery_capacity_kwh, initial_soc_kwh=bus.initial_soc_kwh,
             final_soc_kwh=bus_soc[-1], min_soc_reached_kwh=min_soc, total_trip_energy_kwh=total_trip_energy,
             total_charged_energy_kwh=charged_en, is_charged=charged_en > 0.1, status_flag=diag_status,
-            diagnostic_reason=reason
+            diagnostic_reason=reason, target_initial_soc_kwh=bus.initial_soc_kwh,
+            target_min_final_soc_kwh=end_target(inputs, bus),
+            next_day_required_energy_kwh=bus.next_day_required_energy_kwh if inputs.use_next_day_readiness else 0
         ))
 
     total_energy_kwh = np.sum(aggregated_profile) * delta_t
     total_cost_eur = np.sum(aggregated_profile * np.array(inputs.electricity_prices) * delta_t / 1000.0)
     
     # Baseline comparison (Charge on arrival) - Now respecting constraints
-    baseline_load = simulate_baseline_load(inputs)
+    baseline_load, baseline_issues = simulate_baseline_load(inputs, with_issues=True, minimum_soc_deviation=minimum_soc_deviation)
     baseline_cost = np.sum(baseline_load * np.array(inputs.electricity_prices) * delta_t / 1000.0)
 
-    baseline_issues = simulate_site_baseline(inputs)[1] if inputs.charging_sites else []
     return OptimizationResult(
+        soc_policy=soc_policy_results(inputs, soc_profiles, minimum_soc_deviation),
+        end_condition=end_condition_results(inputs, soc_profiles),
         **visit_results,
         **site_results(inputs, site_state),
         baseline_feasible=not baseline_issues,

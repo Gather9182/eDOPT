@@ -1,5 +1,7 @@
 """Physical connection constraints shared by both MILP formulations."""
 import pulp
+from .soc_policy import preferred_maximum, minimum_energy, reference_policy_issues
+from .end_conditions import reference_end_issues
 
 
 def is_switch_blocked(site, minute):
@@ -169,15 +171,19 @@ def site_results(inputs, state):
     }
 
 
-def simulate_site_baseline(inputs):
+def simulate_site_baseline(inputs, minimum_soc_deviation=None):
     """Arrival charging: a full vehicle still occupies its socket during a lock."""
     import numpy as np
     n = len(inputs.electricity_prices)
     dt = inputs.time_step_minutes / 60
     load = np.zeros(n)
     soc = {b.id: b.initial_soc_kwh for b in inputs.buses}
+    profiles = {bus.id: [bus.initial_soc_kwh] for bus in inputs.buses}
     connections = {b.id: b.initial_connection_site or '' for b in inputs.buses}
     issues = []
+    for bus in inputs.buses:
+        if inputs.operating_min_soc_mode == 'hard' and soc[bus.id] < minimum_energy(inputs, bus) - .001:
+            issues.append(f'Bus {bus.id}: arrival reference violates the operating minimum SoC at the initial state.')
     first_connections = None
     for t in range(n):
         for site in inputs.charging_sites:
@@ -186,13 +192,13 @@ def simulate_site_baseline(inputs):
                 available = bus.site_availability.get(site.id, [0] * n)
                 presence = bus.site_presence.get(site.id, available)
                 arrivals = bus.site_arrivals.get(site.id, [int(presence[k] and not presence[k-1]) for k in range(n)])
-                if connections[bus.id] == site.id and (not presence[t] or arrivals[t] or (not blocked and soc[bus.id] >= bus.max_battery_capacity_kwh - .01)):
+                if connections[bus.id] == site.id and (not presence[t] or arrivals[t] or (not blocked and soc[bus.id] >= preferred_maximum(inputs, bus) - .01)):
                     connections[bus.id] = ''
                 can_connect = not blocked or (site.allow_connect_on_arrival and arrivals[t])
                 # At the first horizon boundary, initialise the unknown parked fleet.
                 can_connect |= t == 0 and bus.initial_connection_site is None and not arrivals[t]
                 occupied = sum(s == site.id for s in connections.values())
-                if not connections[bus.id] and presence[t] and occupied < site.num_chargers and can_connect and soc[bus.id] < bus.max_battery_capacity_kwh - .01:
+                if not connections[bus.id] and presence[t] and occupied < site.num_chargers and can_connect and soc[bus.id] < preferred_maximum(inputs, bus) - .01:
                     connections[bus.id] = site.id
             site_kw = 0
             for bus in inputs.buses:
@@ -201,20 +207,20 @@ def simulate_site_baseline(inputs):
                 kw = max(0, min(bus.max_power_kw, site.charger_power_kw,
                                site.grid_limit_kw - site_kw, site.charger_capacity_kw - site_kw,
                                inputs.grid_limit_kw - load[t], inputs.charger_capacity_kw - load[t],
-                               (bus.max_battery_capacity_kwh - soc[bus.id]) / (dt * bus.efficiency)))
+                               (preferred_maximum(inputs, bus) - soc[bus.id]) / (dt * bus.efficiency)))
                 site_kw += kw
                 load[t] += kw
                 soc[bus.id] += kw * dt * bus.efficiency
         for bus in inputs.buses:
             soc[bus.id] -= bus.trip_energy_profile_kwh[t]
-            if soc[bus.id] < -.01:
-                issues.append(f'Bus {bus.id}: insufficient energy at period {t}.')
+            profiles[bus.id].append(soc[bus.id])
+            floor = minimum_energy(inputs, bus) if inputs.operating_min_soc_mode == 'hard' else 0
+            if soc[bus.id] < floor - .01:
+                issues.append(f'Bus {bus.id}: insufficient battery/operating reserve at period {t}.')
         if t == 0:
             first_connections = dict(connections)
     for bus in inputs.buses:
-        target = bus.min_final_soc_kwh + (bus.next_day_required_energy_kwh if inputs.use_next_day_readiness else 0)
-        if soc[bus.id] < target - .01:
-            issues.append(f'Bus {bus.id}: final readiness not reached by arrival charging.')
+        issues.extend(reference_end_issues(inputs, bus, soc[bus.id]))
         if inputs.cyclic_connections and bus.initial_connection_site is None and n * inputs.time_step_minutes % 1440 == 0:
             for site in inputs.charging_sites:
                 presence = bus.site_presence.get(site.id, bus.site_availability.get(site.id, [0]*n))
@@ -222,4 +228,5 @@ def simulate_site_baseline(inputs):
                 if presence[0] and presence[-1] and not arrivals[0] and is_switch_blocked(site, inputs.horizon_start_minute):
                     if (first_connections[bus.id] == site.id) != (connections[bus.id] == site.id):
                         issues.append(f'Bus {bus.id}: arrival baseline does not preserve the overnight connection at the horizon boundary.')
+    issues.extend(reference_policy_issues(inputs, profiles, minimum_soc_deviation))
     return load, sorted(set(issues))

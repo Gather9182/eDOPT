@@ -61,7 +61,7 @@ def to_minutes(val):
 
 def clean_distance(val, unit="legacy", mixed_km_threshold=50.0):
     if pd.isna(val) or val == "":
-        return 0
+        raise ValueError('Missing distance. Enter an explicit 0 for a zero-distance timetable row.')
 
     if unit != 'legacy':
         text = str(val).strip().lower().replace(' ', '')
@@ -83,21 +83,27 @@ def clean_distance(val, unit="legacy", mixed_km_threshold=50.0):
         return int(round(number * (1000 if effective == 'km' else 1)))
     if isinstance(val, (int, float, np.number)):
         f_val = float(val)
+        if not math.isfinite(f_val) or f_val < 0:
+            raise ValueError(f'Invalid distance: {val!r}')
         if f_val.is_integer():
             return int(f_val)
         return int(round(f_val * 1000))
 
     s = str(val).strip().lower()
+    if s.endswith('km') or s.endswith('m'):
+        return clean_distance(val, unit='m', mixed_km_threshold=mixed_km_threshold)
     s = s.replace("m", "")
-    s = s.replace(",", "")
+    s = s.replace(",", ".")
 
     try:
         f_val = float(s)
+        if not math.isfinite(f_val) or f_val < 0:
+            raise ValueError(f'Invalid distance: {val!r}')
         if f_val.is_integer():
             return int(f_val)
         return int(round(f_val * 1000))
     except (ValueError, TypeError):
-        return 0
+        raise ValueError(f'Invalid distance: {val!r}')
 
 def normalize_vehicle_type(v):
     if pd.isna(v):
@@ -254,7 +260,14 @@ def process_umlauf_excel(file_content: bytes, settings: dict = None):
     df["start_min"] = df["Startzeit"].apply(to_minutes)
     df["end_min"] = df["Endzeit"].apply(to_minutes)
     df["dur_min"] = df["Dauer"].apply(to_minutes)
-    df["Meter"] = df["Meter"].apply(lambda value: clean_distance(value, s['DISTANCE_UNIT'], s['MIXED_KM_THRESHOLD']))
+    df['_distance_original'] = df['Meter'].map(lambda value: '' if pd.isna(value) else str(value))
+    distances = []
+    for _, row in df.iterrows():
+        try:
+            distances.append(clean_distance(row['Meter'], s['DISTANCE_UNIT'], s['MIXED_KM_THRESHOLD']))
+        except ValueError as error:
+            raise ValueError(f"Sheet {sheet_name}, Excel row {int(row['_source_order']) + 2}, route {row['Umlauf']}: {error}") from error
+    df['Meter'] = distances
 
     mask = df["end_min"].isna() & df["start_min"].notna() & df["dur_min"].notna()
     df.loc[mask, "end_min"] = df.loc[mask, "start_min"] + df.loc[mask, "dur_min"]
@@ -314,10 +327,12 @@ def process_umlauf_excel(file_content: bytes, settings: dict = None):
 
     validation_warnings = []
     if s['DISTANCE_UNIT'] == 'legacy':
-        values = pd.to_numeric(raw['Meter'], errors='coerce')
-        ambiguous = raw[(values > 0) & (values < 100) & (values % 1 == 0)]
+        values = pd.to_numeric(df['_distance_original'], errors='coerce')
+        ambiguous = df[(values > 0) & (values < 100) & (values % 1 == 0)]
         if len(ambiguous):
-            validation_warnings.append({'type': 'DISTANCE_UNIT', 'message': f'{len(ambiguous)} small integer distances are interpreted as metres in legacy mode. Verify the selected distance rule (e.g. 21 means 21 m).'} )
+            examples = [f"row {int(row['_source_order']) + 2}: {row['_distance_original']} -> {row['Meter']} m" for _, row in ambiguous.head(6).iterrows()]
+            validation_warnings.append({'type': 'DISTANCE_UNIT', 'count': len(ambiguous), 'examples': examples,
+                'message': f'{len(ambiguous)} small integer distances are interpreted as metres in legacy mode. Verify and confirm the selected distance rule. Examples: ' + '; '.join(examples)})
     windows = []
 
     time_steps, time_labels = build_time_grid(s)
@@ -432,6 +447,9 @@ def process_umlauf_excel(file_content: bytes, settings: dict = None):
             is_tech = (float(trip["Meter"]) == 0) or (trip["Typ"] == "P") or (trip["start_min"] == trip["end_min"])
 
             route_rows.append({
+                'source_sheet': sheet_name, 'source_excel_row': int(trip['_source_order']) + 2,
+                'distance_original': trip['_distance_original'], 'distance_unit_rule': s['DISTANCE_UNIT'],
+                'distance_mixed_threshold': s['MIXED_KM_THRESHOLD'],
                 "source_order": int(trip["_source_order"]),
                 "fahrtnummer": "" if pd.isna(trip["Fahrtnummer"]) else str(int(trip["Fahrtnummer"])) if float(trip["Fahrtnummer"]).is_integer() else str(trip["Fahrtnummer"]),
                 "typ": trip["Typ"],

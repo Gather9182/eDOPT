@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { arrivalComparison } from '../utils/arrivalComparison';
 import { 
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
 } from 'recharts';
@@ -92,17 +93,9 @@ const ModelComparison = () => {
   const kpis = runs.map((run, idx) => {
     const totalOptimizedCost = Number(run.total_cost_eur) || 0;
     
-    // Attempt to calculate baseline cost if missing
-    let totalBaselineCost = Number(run.baseline_cost_eur) || 0;
-    if (!totalBaselineCost && Array.isArray(run.baseline_aggregated_load_profile)) {
-      totalBaselineCost = run.baseline_aggregated_load_profile.reduce((acc, load, i) => {
-        const price = Array.isArray(run.electricity_prices) ? (run.electricity_prices[i] || 0) : 0;
-        return acc + ((Number(load) || 0) * price * 0.25);
-      }, 0) / 1000;
-    }
-    if (!totalBaselineCost) totalBaselineCost = totalOptimizedCost * 1.15; // Fallback
-
-    const savingsPercent = totalBaselineCost > 0 ? ((totalBaselineCost - totalOptimizedCost) / totalBaselineCost) * 100 : 0;
+    const comparison = arrivalComparison(run);
+    const totalBaselineCost = comparison.cost;
+    const savingsPercent = comparison.percent;
     const energyImport = Number(run.total_energy_mwh) || 0;
     
     // PV logic
@@ -142,10 +135,11 @@ const ModelComparison = () => {
       color: RUN_COLORS[idx % RUN_COLORS.length],
       label: runLabel,
       scenario: run.scenario,
+      endCondition: run.end_condition?.mode === 'cyclic_soc' ? 'Start SoC = End SoC' : run.end_condition?.mode === 'next_day_readiness' ? 'Next-Day Readiness' : run.end_condition?.mode === 'end_reserve' ? 'Minimum end reserve' : 'Not recorded',
       cost: totalOptimizedCost,
       baselineCost: totalBaselineCost,
       savings: savingsPercent,
-      baselineFeasible: run.baseline_feasible !== false,
+      baselineFeasible: comparison.comparable && comparison.percent !== null,
       energy: energyImport,
       pvSufficiency: pvSufficiency,
       pvUsed: pvUsed,
@@ -296,6 +290,10 @@ const ModelComparison = () => {
               </tr>
             </thead>
             <tbody>
+              <tr>
+                <td className="font-bold">Bus end condition</td>
+                {kpis.map((kpi, idx) => <td key={idx} className="text-center">{kpi.endCondition}</td>)}
+              </tr>
               <tr>
                 <td className="font-bold">Umläufe berücksichtigt / ausgeschlossen</td>
                 {kpis.map((kpi, idx) => <td key={idx} className="text-center" title={kpi.excludedIds.join(', ')}>{kpi.fleetSize} / {kpi.excludedIds.length}</td>)}

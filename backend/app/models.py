@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
-from typing import List, Dict, Optional
-from pydantic import field_validator
+from typing import List, Dict, Optional, Literal
+from pydantic import field_validator, model_validator
 
 
 class SwitchingWindow(BaseModel):
@@ -120,6 +120,26 @@ class OptimizationInputs(BaseModel):
     min_final_soc_fraction: float = Field(0.2, description="Default minimum final SoC fraction if not specified per bus")
     num_chargers: int = Field(50, description="Number of simultaneous charging sockets available (S_max)")
     use_next_day_readiness: bool = Field(False, description="Enforce final SoC enough for next day's first trips")
+    use_cyclic_soc: bool = Field(False, description="Require each bus to end the repeated 24-hour day at its initial battery energy")
+    operating_min_soc_mode: Literal['off', 'hard', 'soft'] = 'off'
+    operating_min_soc_fraction: float = Field(0.1, ge=0, le=1, allow_inf_nan=False)
+    operating_max_soc_enabled: bool = False
+    operating_max_soc_mode: Literal['hard', 'soft'] = 'soft'
+    operating_max_soc_fraction: float = Field(0.9, ge=0, le=1, allow_inf_nan=False)
+
+    @model_validator(mode='after')
+    def valid_operating_soc_band(self):
+        if self.use_cyclic_soc:
+            if self.use_next_day_readiness:
+                raise ValueError('Start SoC = End SoC and Next-Day Readiness are alternative modes and cannot both be enabled.')
+            if self.planning_horizon_hours != 24 or len(self.electricity_prices) * self.time_step_minutes != 1440:
+                raise ValueError('Start SoC = End SoC is supported only for a complete 24-hour single-horizon run, not multi-day or chunk simulations.')
+            if not self.cyclic_connections:
+                raise ValueError('Start SoC = End SoC requires cyclic connection boundaries; it is not supported for rolling-horizon chunks.')
+        if (self.operating_min_soc_mode != 'off' and self.operating_max_soc_enabled
+                and self.operating_min_soc_fraction > self.operating_max_soc_fraction):
+            raise ValueError('Operating minimum SoC must not exceed the configured maximum SoC.')
+        return self
     
     # PV and BESS extensions
     pv_config: Optional[PVConfig] = None
@@ -148,6 +168,8 @@ class BusDiagnostic(BaseModel):
     diagnostic_reason: str
 
 class OptimizationResult(BaseModel):
+    end_condition: Dict = Field(default_factory=dict)
+    soc_policy: Dict = Field(default_factory=dict)
     scenario: str = "baseline"
     total_cost_eur: float
     total_energy_mwh: float
