@@ -174,6 +174,7 @@ def site_results(inputs, state):
 def simulate_site_baseline(inputs, minimum_soc_deviation=None):
     """Arrival charging: a full vehicle still occupies its socket during a lock."""
     import numpy as np
+    from .charging_curve import max_curve_energy
     n = len(inputs.electricity_prices)
     dt = inputs.time_step_minutes / 60
     load = np.zeros(n)
@@ -204,9 +205,11 @@ def simulate_site_baseline(inputs, minimum_soc_deviation=None):
             for bus in inputs.buses:
                 if connections[bus.id] != site.id or not bus.site_availability.get(site.id, [0] * n)[t]:
                     continue
-                kw = max(0, min(bus.max_power_kw, site.charger_power_kw,
-                               site.grid_limit_kw - site_kw, site.charger_capacity_kw - site_kw,
-                               (preferred_maximum(inputs, bus) - soc[bus.id]) / (dt * bus.efficiency)))
+                available_kw = max(0, min(bus.max_power_kw, site.charger_power_kw,
+                                         site.grid_limit_kw - site_kw, site.charger_capacity_kw - site_kw))
+                kw = max(0, min(available_kw, (preferred_maximum(inputs, bus) - soc[bus.id]) / (dt * bus.efficiency)))
+                if inputs.charging_curve.enabled:
+                    kw = min(kw, max_curve_energy(inputs, bus, soc[bus.id], available_kw, dt, site.charger_power_kw) / (dt * bus.efficiency))
                 site_kw += kw
                 load[t] += kw
                 soc[bus.id] += kw * dt * bus.efficiency

@@ -10,6 +10,7 @@ from .charging_sites import add_site_constraints, site_results, validate_sites, 
 from .opportunity_charging import add_opportunity_variables, link_visit_charging, opportunity_results, possible_availability
 from .soc_policy import solve_soc_policy, soc_policy_results, preferred_maximum, minimum_energy, reference_policy_issues
 from .end_conditions import end_target, add_end_condition, reference_end_issues, end_condition_results
+from .charging_curve import add_charging_curve, max_curve_energy, charging_curve_results
 
 def simulate_baseline_load(inputs: OptimizationInputs, with_issues=False, minimum_soc_deviation=None):
     """
@@ -57,8 +58,11 @@ def simulate_baseline_load(inputs: OptimizationInputs, with_issues=False, minimu
                     
                     remaining_grid_kw = max(0.0, min(inputs.grid_limit_kw, inputs.charger_capacity_kw) - current_step_grid_kw)
                     allowable_kw = min(max_bus_kw, needed_kw, remaining_grid_kw)
+                    if inputs.charging_curve.enabled:
+                        allowable_kw = min(allowable_kw, max_curve_energy(inputs, bus, bus_socs[i],
+                                           min(max_bus_kw, remaining_grid_kw), delta_t) / (delta_t * bus.efficiency))
                     
-                    if allowable_kw > 1.0:
+                    if allowable_kw > (1e-8 if inputs.charging_curve.enabled else 1.0):
                         chg_kwh = allowable_kw * delta_t * bus.efficiency
                         baseline_load[t] += allowable_kw
                         bus_socs[i] += chg_kwh
@@ -214,7 +218,7 @@ async def run_scenario_optimization(inputs: OptimizationInputs, solver_logs: Lis
     try:
         basic_res = await run_milp_solver(basic_baseline_inputs)
     except RuntimeError:
-        if not inputs.charging_sites and not inputs.use_cyclic_soc:
+        if not inputs.charging_sites and not inputs.use_cyclic_soc and not inputs.charging_curve.enabled:
             raise
         basic_res = None
         solver_logs.append('The grid-only comparison is infeasible for these locations. Solving the requested PV/BESS scenario independently.')
@@ -441,6 +445,7 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
     site_state = add_site_constraints(prob, inputs, p_vars, grid_import, (pv_used, b_charge, b_discharge), opportunities)
     if site_state:
         link_visit_charging(prob, inputs, opportunities, site_state[0], site_state[1], soc_vars)
+    add_charging_curve(prob, inputs, p_vars, soc_vars, site_state, solver_logs)
     # --- Solve ---
     minimum_soc_deviation = solve_soc_policy(prob, inputs, soc_vars, solver_logs)
     status = pulp.LpStatus[prob.status]
@@ -548,6 +553,7 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
         peak_load_kw=round(float(np.max(import_prof)), 2),
         schedules=schedules,
         soc_profiles=soc_profiles,
+        charging_curve=charging_curve_results(inputs),
         aggregated_load_profile=[round(x, 1) for x in aggregated_load],
         grid_import_profile=import_prof,
         baseline_aggregated_load_profile=[round(x, 1) for x in baseline_load.tolist()],
@@ -623,6 +629,7 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
     site_state = add_site_constraints(prob, inputs, p_vars, opportunities=opportunities)
     if site_state:
         link_visit_charging(prob, inputs, opportunities, site_state[0], site_state[1], soc_vars)
+    add_charging_curve(prob, inputs, p_vars, soc_vars, site_state, solver_logs)
     minimum_soc_deviation = solve_soc_policy(prob, inputs, soc_vars, solver_logs)
     status = pulp.LpStatus[prob.status]
 
@@ -683,6 +690,7 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
         peak_load_kw=round(float(np.max(aggregated_profile)), 2),
         schedules=schedules,
         soc_profiles=soc_profiles,
+        charging_curve=charging_curve_results(inputs),
         aggregated_load_profile=[round(x, 1) for x in aggregated_profile.tolist()],
         grid_import_profile=[round(x, 1) for x in aggregated_profile.tolist()],
         baseline_aggregated_load_profile=[round(x, 1) for x in baseline_load.tolist()],

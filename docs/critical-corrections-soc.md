@@ -88,7 +88,40 @@ shared with the proven optimum do not automatically invalidate the reference.
 The no-site arrival heuristic now checks un-clamped energy and final readiness.
 Historical heuristic fallback results are not validated reference comparisons.
 
-## Independent charging location limits
+## Optional SoC-dependent charging curve
+
+The curve defaults off for existing and new projects. Enable it in Optimization
+settings. The common fleet curve has 1–8 contiguous SoC bands (0–100%), each
+with a positive percentage of the connected location's `charger_power_kw`.
+Defaults: 0–60%: 90%, 60–80%: 65%, 80–90%: 35%, 90–100%: 15%.
+A 150 kW charger gives 135, 97.5, 52.5 and 22.5 kW before bus efficiency losses;
+a 50 kW charger gives 45, 32.5, 17.5 and 7.5 kW. There is no common absolute
+reference power. Without configured locations, the bus maximum power is the
+reference. Lower bus and site limits are applied after the charger percentage.
+The serialized basis is `site_charger_power`. Historical fixed-reference results
+retain their original interpretation and are not relabelled; a new run is required.
+
+Both MILPs enforce an exact piecewise cumulative charging-time function between
+the start battery energy and the energy after charging. Crossing a band during
+a time step consumes time in each crossed band; the start-of-step power is not
+applied to the whole interval. Arbitrary positive band rates, including increases,
+are supported. Bus, connector and aggregate location limits remain additional
+constraints. The curve uses the lower of charger-band power and bus capacity;
+it does not multiply a lower bus limit by the charger percentage again.
+Shared site/grid power limits retain the existing interval-average semantics;
+this is not a continuous simulation of simultaneous charger power within a slot.
+Interval trip energy is deducted after charging, consistent with bus balances.
+The battery must not exceed physical capacity before this deduction when enabled.
+
+Arrival reference charging and optimistic energy prechecks integrate the same
+curve. Exact route diagnoses inherit it; heuristic fallback cannot bypass it.
+PV/BESS and additional charging visits also use this bus curve. Stationary BESS
+charging is unchanged. Soft SoC limits cannot relax the charging curve.
+Requests, saved results, diagnostics, result ZIP and XLSX include the curve.
+Enabling it invalidates the current check and requires a new optimization;
+historical results do not change. The extra MILP variables may increase runtime.
+
+## Location limits
 
 When `charging_sites` contains configured locations, each location's grid
 connection, aggregate charger capacity, connector power and connector count

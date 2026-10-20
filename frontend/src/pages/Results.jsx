@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { arrivalComparison } from '../utils/arrivalComparison';
 import SocPolicyResults from '../components/SocPolicyResults';
 import EndConditionResults from '../components/EndConditionResults';
+import ChargingCurveResults from '../components/ChargingCurveResults';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area,
   LineChart, Line, Legend, ReferenceLine, ComposedChart, Brush, ReferenceArea
@@ -2722,6 +2723,7 @@ const Results = () => {
       <ChargingSiteResults results={results} day={results.is_long_term && isDrillDown ? selectedDay : null} />
       <SocPolicyResults policy={results.soc_policy} />
       <EndConditionResults condition={results.end_condition} />
+      <ChargingCurveResults curve={results.charging_curve || results.run_metadata?.inputs?.charging_curve} />
       {!arrivalReference.comparable && <p role="status" className="card p-4 mb-4 text-warning">Savings: n.a. {arrivalReference.reason} {results.baseline_issues?.slice(0,3).join(' ')}</p>}
       {results.storage_pruned && (
         <div className="bg-warning/10 border border-warning/20 rounded-2xl p-4 mb-8 animate-in slide-in-from-top-2 duration-500">

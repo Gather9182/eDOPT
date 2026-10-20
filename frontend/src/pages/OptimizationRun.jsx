@@ -1,4 +1,6 @@
 import CustomSelect from '../components/CustomSelect';
+import ChargingCurveSettings from '../components/ChargingCurveSettings';
+import {chargingCurveIssues} from '../utils/chargingCurve';
 import {socPolicyInputs, socPolicyIssues, mergeSocPolicies, endConditionPatch, endConditionIssues} from '../utils/socPolicy';
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Zap, Terminal, Battery, Clock, CheckCircle, AlertCircle, Loader2, Table as TableIcon, Info, Save, ChevronDown, ChevronUp, Sun, Layers, LayoutDashboard, Activity, Sliders, MapPin, Navigation } from 'lucide-react';
@@ -942,7 +944,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     const recordValidation = (result, request = null, origin = 'backend', transportError = null) => {
       setValidationState({ key, result, diagnostic:validationDiagnostic(context, result, request, origin, transportError) });
     };
-    const policyIssues = [...socPolicyIssues(localSettings), ...endConditionIssues(localSettings, simulationMode)];
+    const policyIssues = [...socPolicyIssues(localSettings), ...endConditionIssues(localSettings, simulationMode), ...chargingCurveIssues(localSettings)];
     if (policyIssues.length) {
       recordValidation({status:'invalid',issues:policyIssues}, null, 'frontend');
       setIsValidating(false);
@@ -1605,6 +1607,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
               {localSettings.operating_max_soc_enabled && localSettings.operating_max_soc_mode === 'hard' && <p className="text-sm text-muted mt-2">Hard maximum applies to every modelled battery state, including the initial SoC. Conflicting initial charge or end targets are reported as errors.</p>}
               <p className="text-sm text-muted mt-3">Soft limits may be relaxed only as needed for feasibility. The solver first minimises total deviations, then electricity cost. Min and max deviations have equal weight. Absolute battery bounds remain 0–100%; two solver stages may increase runtime.</p>
             </div>
+
+            <ChargingCurveSettings curve={localSettings.charging_curve} onChange={charging_curve => updateSocSettings({charging_curve})} />
 
             <div className="card shadow-sm">
               <h3 className="card-title text-primary flex items-center gap-2"><Zap size={18} className="text-primary" /> Depot Infrastructure</h3>

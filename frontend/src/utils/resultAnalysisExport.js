@@ -166,6 +166,12 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
     {name:'tables/operating_soc_deviations.csv',data:objectCsv(results.soc_policy?.violations || [],['bus_id','minute','state_index','kind','soc_kwh','limit_kwh','deviation_kwh','soc_percent','initial_state'])});
   files.push({name:'run/end_condition.json',data:json(results.end_condition || null)},
     {name:'tables/bus_end_conditions.csv',data:objectCsv(results.end_condition?.buses || [],['bus_id','initial_soc_kwh','final_soc_kwh','difference_kwh','target_soc_kwh','min_final_soc_kwh','compliant'])});
+  const curve = results.charging_curve || inputs?.charging_curve || null;
+  files.push({name:'run/charging_curve.json',data:json(curve)},
+    {name:'tables/charging_curve.csv',data:objectCsv((curve?.bands || []).map((band,i) => ({enabled:curve.enabled,
+      power_basis:curve.power_basis || 'historical_fixed_reference',start_soc_fraction:curve.bands[i-1]?.end_soc_fraction || 0,
+      ...band,...(curve.power_basis !== 'site_charger_power' && Number.isFinite(curve.nominal_power_kw) ?
+        {historical_nominal_power_kw:curve.nominal_power_kw,historical_power_kw:curve.nominal_power_kw*band.power_fraction} : {})})),['enabled','power_basis','start_soc_fraction','end_soc_fraction','power_fraction'])});
   files.push({name:'tables/charging_sessions.csv',data:csv((function* () {
     yield ['Route','Day_zero_based','Global_start_min','Global_end_min','Origin','Site_ID','Site_name','Average_kW','Grid_energy_kWh','Round_trip_km','Driving_minutes','Explanation'];
     if (!usableStep) return;

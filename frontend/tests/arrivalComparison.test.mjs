@@ -37,7 +37,9 @@ test('SoC policy defaults preserve old projects and all active values are passed
   assert.equal(socPolicyInputs({operating_max_soc_enabled:true}).operating_max_soc_mode,'soft');
   const settings={use_cyclic_soc:false,operating_min_soc_mode:'soft',operating_min_soc_fraction:0,
     operating_max_soc_enabled:true,operating_max_soc_mode:'hard',operating_max_soc_fraction:1};
-  assert.deepEqual(socPolicyInputs(settings),settings);
+  const {charging_curve,...policy} = socPolicyInputs(settings);
+  assert.equal(charging_curve.enabled,false);
+  assert.deepEqual(policy,settings);
 });
 
 test('long-term SoC reports preserve global chunk times and separate local optimality', () => {

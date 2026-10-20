@@ -8,6 +8,7 @@ Failure even in this optimistic case proves an individual energy shortfall.
 from .opportunity_charging import potential_profiles, possible_availability
 from .soc_policy import minimum_energy, preferred_maximum
 from .end_conditions import end_target
+from .charging_curve import max_curve_energy
 
 
 def energy_feasibility_issues(inputs):
@@ -53,10 +54,12 @@ def energy_feasibility_issues(inputs):
         soc = bus.initial_soc_kwh
         for t, energy in enumerate(bus.trip_energy_profile_kwh):
             power = 0
+            curve_gain = None
             if availability[t]:
                 power = bus.max_power_kw
                 if inputs.charging_sites:
                     site_limits = []
+                    curve_gains = []
                     for site in inputs.charging_sites:
                         available = potential.get(site.id, [])
                         if site.num_chargers > 0 and len(available) == n and available[t]:
@@ -64,7 +67,11 @@ def energy_feasibility_issues(inputs):
                             if inputs.scenario == 'baseline' or site.id != inputs.energy_site_id:
                                 limit = min(limit, site.grid_limit_kw)
                             site_limits.append(limit)
+                            if inputs.charging_curve.enabled:
+                                curve_gains.append(max_curve_energy(inputs, bus, soc, min(bus.max_power_kw,limit), dt, site.charger_power_kw))
                     power = min(power, max(site_limits, default=0))
+                    if inputs.charging_curve.enabled:
+                        curve_gain = max(curve_gains, default=0)
                 else:
                     power = min(power, inputs.charger_capacity_kw)
                     if inputs.scenario == 'baseline':
@@ -73,7 +80,9 @@ def energy_feasibility_issues(inputs):
                         power = 0
             # Match the solver's interval-end capacity bound, including legacy
             # profiles with charging and consumption during the same interval.
-            soc = min(upper, soc + max(0, power) * dt * bus.efficiency - energy)
+            gain = ((curve_gain if curve_gain is not None else max_curve_energy(inputs, bus, soc, max(0,power), dt))
+                    if inputs.charging_curve.enabled else max(0, power) * dt * bus.efficiency)
+            soc = min(upper, soc + gain - energy)
             if soc < floor - .01:
                 minute = inputs.horizon_start_minute + t * inputs.time_step_minutes
                 issues.append(dict(type='ERROR', code='BUS_ENERGY_INFEASIBLE', category='energy', bus_id=bus.id,

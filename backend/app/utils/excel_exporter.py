@@ -43,6 +43,20 @@ class ExcelExporter:
             else:
                 ExcelExporter._write_single_horizon(writer, results)
             ExcelExporter._write_charging_sites(writer, results)
+            curve = results.get('charging_curve') or results.get('run_metadata', {}).get('inputs', {}).get('charging_curve')
+            if curve:
+                start = 0
+                rows = []
+                for band in curve.get('bands', []):
+                    row = {'Enabled':curve.get('enabled',False),'Power basis':curve.get('power_basis','historical_fixed_reference'),
+                                 'SoC from (%)':start*100,'SoC to (%)':band['end_soc_fraction']*100,
+                                 'Charger power (%)':band['power_fraction']*100}
+                    if curve.get('power_basis') != 'site_charger_power' and 'nominal_power_kw' in curve:
+                        row.update({'Historical nominal power (kW)':curve['nominal_power_kw'],
+                                    'Historical curve power (kW)':curve['nominal_power_kw']*band['power_fraction']})
+                    rows.append(row)
+                    start = band['end_soc_fraction']
+                pd.DataFrame(rows).to_excel(writer,sheet_name='Charging Curve',index=False)
             end = results.get('end_condition', {})
             if end:
                 pd.DataFrame([{'Setting':key,'Value':str(value)} for key,value in end.items() if key != 'buses']).to_excel(writer,sheet_name='End Condition Settings',index=False)

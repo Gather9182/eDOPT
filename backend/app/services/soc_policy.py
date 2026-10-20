@@ -13,7 +13,7 @@ SOFT_TOLERANCE_KWH_H = 1e-6
 
 
 def policy_active(inputs):
-    return inputs.use_cyclic_soc or inputs.operating_min_soc_mode != 'off' or inputs.operating_max_soc_enabled
+    return inputs.charging_curve.enabled or inputs.use_cyclic_soc or inputs.operating_min_soc_mode != 'off' or inputs.operating_max_soc_enabled
 
 
 def minimum_energy(inputs, bus):

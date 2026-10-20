@@ -32,6 +32,17 @@ function fixture() {
   return {results,project,current,request};
 }
 
+test('analysis package exports the saved charging curve without substituting current settings',async () => {
+  const {results,current}=fixture();
+  results.charging_curve={enabled:true,nominal_power_kw:150,bands:[{end_soc_fraction:1,power_fraction:.15}]};
+  current.constraints.charging_curve={enabled:false,nominal_power_kw:900,bands:[]};
+  const {files}=await resultAnalysisFiles(results,current,lookup);
+  const saved=JSON.parse(files.find(file=>file.name==='run/charging_curve.json').data);
+  assert.equal(saved.nominal_power_kw,150);
+  assert.equal(saved.enabled,true);
+  assert.match(files.find(file=>file.name==='tables/charging_curve.csv').data,/22.5/);
+});
+
 test('analysis package preserves cyclic end condition and per-bus equality evidence',async () => {
   const {results,current}=fixture();
   results.run_metadata.request_inputs.use_cyclic_soc=true;

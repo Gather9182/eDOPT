@@ -107,6 +107,28 @@ class BESSConfig(BaseModel):
     thermal_heating_coefficient: float = Field(0.02, description="Heat gain per kWh processed (°C/kWh)")
     temperature_source: str = Field("open_meteo", description="Source for ambient temperature data")
 
+class ChargingCurveBand(BaseModel):
+    end_soc_fraction: float = Field(..., gt=0, le=1, allow_inf_nan=False)
+    power_fraction: float = Field(..., gt=0, le=1, allow_inf_nan=False)
+
+
+class ChargingCurve(BaseModel):
+    enabled: bool = False
+    power_basis: Literal['site_charger_power'] = 'site_charger_power'
+    bands: List[ChargingCurveBand] = Field(default_factory=lambda: [
+        ChargingCurveBand(end_soc_fraction=end, power_fraction=power)
+        for end, power in [(0.6, 0.9), (0.8, 0.65), (0.9, 0.35), (1, 0.15)]])
+
+    @model_validator(mode='after')
+    def valid_bands(self):
+        if not 1 <= len(self.bands) <= 8:
+            raise ValueError('Charging curve requires 1 to 8 SoC bands.')
+        ends = [band.end_soc_fraction for band in self.bands]
+        if any(right <= left for left, right in zip([0] + ends, ends)) or abs(ends[-1] - 1) > 1e-9:
+            raise ValueError('Charging curve bands must increase from 0% and end at 100% without gaps.')
+        return self
+
+
 class OptimizationInputs(BaseModel):
     scenario: str = Field("baseline", description="Scenario mode: baseline, pv, bess, pv_bess")
     planning_horizon_hours: int = Field(24, description="Total hours (T)")
@@ -121,6 +143,7 @@ class OptimizationInputs(BaseModel):
     num_chargers: int = Field(50, description="Number of simultaneous charging sockets available (S_max)")
     use_next_day_readiness: bool = Field(False, description="Enforce final SoC enough for next day's first trips")
     use_cyclic_soc: bool = Field(False, description="Require each bus to end the repeated 24-hour day at its initial battery energy")
+    charging_curve: ChargingCurve = Field(default_factory=ChargingCurve)
     operating_min_soc_mode: Literal['off', 'hard', 'soft'] = 'off'
     operating_min_soc_fraction: float = Field(0.1, ge=0, le=1, allow_inf_nan=False)
     operating_max_soc_enabled: bool = False
@@ -168,6 +191,7 @@ class BusDiagnostic(BaseModel):
     diagnostic_reason: str
 
 class OptimizationResult(BaseModel):
+    charging_curve: Dict = Field(default_factory=dict)
     end_condition: Dict = Field(default_factory=dict)
     soc_policy: Dict = Field(default_factory=dict)
     scenario: str = "baseline"

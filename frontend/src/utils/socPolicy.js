@@ -1,5 +1,7 @@
+import {chargingCurveInputs} from './chargingCurve.js';
+
 export function socPolicyInputs(settings) {
-  return {use_cyclic_soc:settings.use_cyclic_soc ?? false,
+  return {charging_curve:chargingCurveInputs(settings),use_cyclic_soc:settings.use_cyclic_soc ?? false,
     operating_min_soc_mode:settings.operating_min_soc_mode ?? 'off',
     operating_min_soc_fraction:settings.operating_min_soc_fraction ?? .1,
     operating_max_soc_enabled:settings.operating_max_soc_enabled ?? false,
