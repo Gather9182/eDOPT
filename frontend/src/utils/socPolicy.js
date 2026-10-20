@@ -16,6 +16,7 @@ export function endConditionPatch(patch) {
 }
 
 export function endConditionIssues(settings, simulationMode) {
+  if (simulationMode === 'daily_cyclic') return [];
   if (!settings.use_cyclic_soc) return [];
   const messages = [];
   if (settings.use_next_day_readiness) messages.push('Start SoC = End SoC and Next-Day Readiness cannot both be enabled.');

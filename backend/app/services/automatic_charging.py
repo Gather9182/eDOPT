@@ -9,6 +9,7 @@ import pulp
 from .charging_sites import slot_is_blocked
 from .soc_policy import preferred_maximum
 from .opportunity_charging import potential_profiles
+from .optimization_progress import check_cancelled
 
 
 def balanced_allocation(caps, budget):
@@ -40,6 +41,7 @@ def add_automatic_charging(problem, inputs, states, site_state, opportunities, c
     potential = {bus.id:potential_profiles(bus,inputs) for bus in inputs.buses}
     for si,site in enumerate(automatic_sites):
         for t in range(n):
+            check_cancelled()
             if not slot_is_blocked(site,inputs.horizon_start_minute+t*inputs.time_step_minutes,inputs.time_step_minutes):
                 continue
             if not any(potential[bus.id].get(site.id,[0]*n)[t] for bus in inputs.buses):

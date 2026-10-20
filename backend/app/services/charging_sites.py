@@ -1,5 +1,6 @@
 """Physical connection constraints shared by both MILP formulations."""
 import pulp
+from .optimization_progress import check_cancelled
 from .soc_policy import preferred_maximum, minimum_energy, reference_policy_issues
 from .end_conditions import reference_end_issues
 
@@ -82,6 +83,7 @@ def add_site_constraints(prob, inputs, power, grid_import=None, energy_flows=Non
     connected, site_power, grids = {}, {}, {}
     dynamic_buses = {item['bus'].id for item in (opportunities or {}).get('visits', [])}
     for bi, bus in enumerate(inputs.buses):
+        check_cancelled()
         for si, site in enumerate(sites):
             available = bus.site_availability.get(site.id, [0] * n)
             present = bus.site_presence.get(site.id, available)

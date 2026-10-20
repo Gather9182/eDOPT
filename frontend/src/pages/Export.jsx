@@ -8,6 +8,7 @@ import { getItem } from '../utils/db';
 import { exportExcel } from '../services/api';
 import { BRANDING } from '../components/PrintReportTemplate';
 import { resultAnalysisFiles } from '../utils/resultAnalysisExport';
+import DailyCyclicSummary from '../components/DailyCyclicSummary';
 import { diagnosticZip } from '../utils/diagnosticExport';
 
 const getFormattedFilename = (results, ext) => {
@@ -383,6 +384,7 @@ const Export = ({ projectData }) => {
         </div>
       </div>
 
+      <DailyCyclicSummary results={results} />
       {/* Grid of Export Options */}
       {zipError && <p role="alert" className="text-error mb-4">{zipError}</p>}
       {zipNotice && <p role="status" className="text-sm text-secondary mb-4">{zipNotice}</p>}

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pulp
+from .cancellable_solver import CancellableCBC
 from .optimization_progress import current_progress, report_progress
 
 route_solve_deadline = ContextVar('route_solve_deadline', default=None)
@@ -60,7 +61,7 @@ def energy_relaxation(problem, inputs):
     if not injections:
         return dict(status='Unavailable', findings=[], note=note)
     diagnostic.setObjective(pulp.lpSum(variable for _, _, variable in injections))
-    diagnostic.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=10))
+    diagnostic.solve(CancellableCBC(msg=0, timeLimit=10))
     status = pulp.LpStatus[diagnostic.status]
     certified = diagnostic.sol_status == pulp.LpSolutionOptimal
     feasible = diagnostic.sol_status in (pulp.LpSolutionOptimal, pulp.LpSolutionIntegerFeasible)
@@ -85,7 +86,7 @@ def solve_with_diagnostics(problem, inputs, solver_logs=None):
             raise OptimizationFailure('Individual check time budget exhausted.', dict(solver_status='Not Solved'))
         # An exact isolated check uses the original MILP rules, with no heuristic
         # fallback, artificial energy, or recursive failure diagnostics.
-        problem.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=min(5, remaining)))
+        problem.solve(CancellableCBC(msg=0, timeLimit=min(5, remaining)))
         status = pulp.LpStatus[problem.status]
         if problem.sol_status in (pulp.LpSolutionOptimal, pulp.LpSolutionIntegerFeasible):
             return
@@ -96,7 +97,7 @@ def solve_with_diagnostics(problem, inputs, solver_logs=None):
         if progress:
             progress.start_solver(log_path,problem,180)
         try:
-            problem.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=180, logPath=str(log_path)))
+            problem.solve(CancellableCBC(msg=0, timeLimit=180, logPath=str(log_path)))
         except Exception as error:
             execution_error = str(error)
         status = 'Solver error' if execution_error is not None else pulp.LpStatus[problem.status]

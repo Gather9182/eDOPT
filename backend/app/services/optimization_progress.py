@@ -12,6 +12,17 @@ from pathlib import Path
 from threading import RLock
 
 current_progress = ContextVar('optimization_progress', default=None)
+
+
+class OptimizationCancelled(BaseException):
+    """Control flow, deliberately not a solver failure or heuristic fallback."""
+
+
+def check_cancelled():
+    progress = current_progress.get()
+    if progress:
+        progress.check_cancelled()
+
 NUMBER = r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?'
 
 
@@ -57,6 +68,35 @@ class Progress:
         self.last_solver_log = None
         self.result = None
         self.error = None
+        self.cancel_requested = False
+        self.process = None
+
+    def check_cancelled(self):
+        if self.cancel_requested:
+            raise OptimizationCancelled('Optimization cancelled by the user.')
+
+    def attach_process(self, process):
+        with self.lock:
+            self.process = process
+            if self.cancel_requested and process.poll() is None:
+                process.kill()
+
+    def detach_process(self, process):
+        with self.lock:
+            if self.process is process:
+                self.process = None
+
+    def cancel(self):
+        with self.lock:
+            if self.data['status'] in ('completed','failed','cancelled'):
+                return
+            self.cancel_requested = True
+            if self.process and self.process.poll() is None:
+                self.process.kill()
+            if self.data['status'] == 'queued':
+                self.update('cancelled','Queued optimization cancelled before execution.',status='cancelled')
+            else:
+                self.update('cancelling','Stopping optimization. Waiting for the worker to release resources.',status='cancelling')
 
     def update(self, phase, message, **fields):
         with self.lock:
@@ -123,6 +163,7 @@ class Progress:
 def report_progress(phase, message, **fields):
     progress = current_progress.get()
     if progress:
+        progress.check_cancelled()
         progress.update(phase,message,**fields)
 
 
@@ -141,11 +182,11 @@ class OptimizationJobs:
     def submit(self, inputs):
         with self.lock:
             now = time.monotonic()
-            finished = [key for key,value in self.jobs.items() if value.data['status'] in ('completed','failed')]
+            finished = [key for key,value in self.jobs.items() if value.data['status'] in ('completed','failed','cancelled')]
             for key in finished:
                 if now-self.jobs[key].updated > 1800 or len(self.jobs) >= 8:
                     del self.jobs[key]
-            if sum(value.data['status'] in ('queued','running') for value in self.jobs.values()) >= 4:
+            if sum(value.data['status'] in ('queued','running','cancelling') for value in self.jobs.values()) >= 4:
                 raise RuntimeError('The optimization queue is full. Wait for an active run to finish.')
             key = uuid.uuid4().hex
             progress = Progress()
@@ -156,11 +197,18 @@ class OptimizationJobs:
     def _run(self, progress, inputs):
         token = current_progress.set(progress)
         try:
+            progress.check_cancelled()
             progress.update('precheck','Checking input data and energy bounds.',status='running')
             result = self.runner(inputs)
             with progress.lock:
+                progress.check_cancelled()
                 progress.result = result.model_dump(mode='json') if hasattr(result,'model_dump') else result
                 progress.update('completed','Optimization completed.',status='completed')
+        except OptimizationCancelled:
+            with progress.lock:
+                progress.result = None
+                progress.log_path = None
+                progress.update('cancelled','Optimization cancelled. No result from this job was accepted.',status='cancelled')
         except Exception as error:
             with progress.lock:
                 progress.error = dict(detail=str(error))
@@ -175,4 +223,12 @@ class OptimizationJobs:
             progress = self.jobs.get(key)
         if progress is None:
             raise KeyError(key)
+        return progress.snapshot()
+
+    def cancel(self, key):
+        with self.lock:
+            progress = self.jobs.get(key)
+        if progress is None:
+            raise KeyError(key)
+        progress.cancel()
         return progress.snapshot()

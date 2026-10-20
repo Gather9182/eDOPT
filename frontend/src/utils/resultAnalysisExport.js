@@ -71,6 +71,18 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
     {name:'run/logs.json',data:json({solver:results.solver_logs || [],interface:metadata.interface_logs || []})},
     {name:'environment_at_export.json',data:json(environment)},
   ];
+  if (results.long_term_mode === 'daily_cyclic') {
+    files.push({name:'run/days/status.json',data:json({status:results.run_status,scope:results.timetable_scope,days:results.day_records,failed_attempts:results.failed_attempts || []})});
+    for (const [index,day] of (results.daily_results || []).entries()) {
+      const prefix=`run/days/day_${String(index+1).padStart(5,'0')}`;
+      files.push({name:`${prefix}/request.json`,data:json(day.request)},{name:`${prefix}/prices.json`,data:json(day.prices)},
+        {name:`${prefix}/result.json`,data:json(day.result)},{name:`${prefix}/date.json`,data:json({date:day.date,day_index:day.day_index})});
+    }
+    files.push({name:'tables/daily_summary.csv',data:objectCsv((results.day_records || []).map(day=>({date:day.date,status:day.status,
+      cost_eur:day.reconciliation?.cost_eur,grid_energy_kwh:day.reconciliation?.grid_energy_kwh,charger_energy_mwh:day.reconciliation?.charger_energy_mwh,error:day.error?.detail})),['date','status','cost_eur','grid_energy_kwh','charger_energy_mwh'])},
+      {name:'tables/daily_soc_connections.csv',data:objectCsv(results.end_condition?.buses || [],['date','day_index','bus_id','initial_soc_kwh','final_soc_kwh','previous_final_soc_kwh','initial_connection','previous_final_connection','final_connection','compliant'])},
+      {name:'tables/daily_prices.csv',data:objectCsv((results.daily_results || []).flatMap(day=>day.prices.timestamps.map((timestamp,t)=>({date:day.date,timestamp,market_price_eur_mwh:day.prices.market_prices[t],effective_price_eur_mwh:day.request.electricity_prices[t]}))),['date','timestamp','market_price_eur_mwh','effective_price_eur_mwh'])});
+  }
   const requestArchive = [];
   for (const record of metadata.request_archive || []) {
     const descriptor = {...record};
@@ -223,6 +235,7 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
   files.push({name:'reconciliation.json',data:json(reconciliation)});
   const manifest = {format:'edopt-result-analysis',schema_version:1,exported_at:now.toISOString(),run_id:metadata.run_id || null,
     run_timestamp:metadata.timestamp || null,scenario:results.scenario || null,is_long_term:Boolean(results.is_long_term),
+    long_term_mode:results.long_term_mode || metadata.long_term_mode || null,run_status:results.run_status || null,requested_days:results.requested_days ?? null,timetable_scope:results.timetable_scope || null,
     solver_status:results.status ?? null,optimization_gap:results.optimization_gap ?? null,baseline_feasible:results.baseline_feasible ?? null,
     total_days:results.total_days ?? null,time_step_minutes:usableStep,included_bus_ids:[...includedIds],excluded_bus_ids:excludedIds,
     project_snapshot_available:Boolean(project),exact_single_request_available:Boolean(metadata.request_inputs),

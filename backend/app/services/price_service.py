@@ -5,6 +5,62 @@ import datetime as dt
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 import pytz
+import math
+
+
+def historical_day_grid(date_str, resolution_min=15):
+    day = dt.date.fromisoformat(date_str)
+    if resolution_min < 1 or 1440 % resolution_min:
+        raise ValueError('Historical comparison resolution must divide 1440 minutes exactly.')
+    zone = pytz.timezone('Europe/Vienna')
+    start = zone.localize(dt.datetime.combine(day,dt.time())).astimezone(dt.timezone.utc)
+    end = zone.localize(dt.datetime.combine(day+dt.timedelta(days=1),dt.time())).astimezone(dt.timezone.utc)
+    if end-start != dt.timedelta(hours=24):
+        raise ValueError(f'{date_str}: daylight-saving transition days (23/25 hours) are not supported by Daily Cyclic. No artificial 24-hour prices were generated.')
+    return start,end
+
+
+def historical_calendar(start_date,end_date,resolution_min=15):
+    first,last = dt.date.fromisoformat(start_date),dt.date.fromisoformat(end_date)
+    if last < first or (last-first).days > 3660:
+        raise ValueError('Choose an ordered date range of at most 3661 days.')
+    dates = [(first+dt.timedelta(days=i)).isoformat() for i in range((last-first).days+1)]
+    for date in dates:
+        historical_day_grid(date,resolution_min)
+    return dates
+
+
+def map_strict_historical_day(date_str,resolution_min,raw_prices):
+    start,end = historical_day_grid(date_str,resolution_min)
+    intervals = []
+    for entry in raw_prices:
+        left,right = entry['timestamp_utc'],entry.get('end_timestamp_utc')
+        price = float(entry['price_eur_mwh'])
+        if not right or not left.tzinfo or not right.tzinfo or right <= left or not math.isfinite(price):
+            raise ValueError(f'{date_str}: invalid historical source interval or price.')
+        left,right = left.astimezone(dt.timezone.utc),right.astimezone(dt.timezone.utc)
+        if right > start and left < end:
+            intervals.append((max(left,start),min(right,end),price))
+    intervals.sort(key=lambda item:item[0])
+    cursor = start
+    for left,right,_ in intervals:
+        if left != cursor:
+            raise ValueError(f'{date_str}: historical price gap, duplicate or overlapping interval at {cursor.isoformat()}. No fallback prices were used.')
+        cursor = right
+    if cursor != end:
+        raise ValueError(f'{date_str}: historical prices do not cover the complete local day. No fallback prices were used.')
+    prices,timestamps = [],[]
+    step = dt.timedelta(minutes=resolution_min)
+    zone = pytz.timezone('Europe/Vienna')
+    for i in range(1440//resolution_min):
+        left = start+i*step
+        right = left+step
+        price = sum(value*(min(right,b)-max(left,a)).total_seconds() for a,b,value in intervals if a < right and b > left)/step.total_seconds()
+        prices.append(price)
+        timestamps.append(left.astimezone(zone).isoformat())
+    return dict(date=date_str,timezone='Europe/Vienna',resolution_min=resolution_min,
+                timestamps=timestamps,market_prices=prices,source='aWATTar Austria',coverage='complete',
+                source_intervals=[dict(start_utc=a.isoformat(),end_utc=b.isoformat(),price_eur_mwh=p) for a,b,p in intervals])
 
 class PriceProvider(ABC):
     @abstractmethod
@@ -49,6 +105,7 @@ class AWattarProvider(PriceProvider):
                         for item in data.get("data", []):
                             results.append({
                                 "timestamp_utc": dt.datetime.fromtimestamp(item["start_timestamp"] / 1000, tz=dt.timezone.utc),
+                                "end_timestamp_utc": dt.datetime.fromtimestamp(item["end_timestamp"] / 1000, tz=dt.timezone.utc),
                                 "price_eur_mwh": float(item["marketprice"])
                             })
                     else:
@@ -76,6 +133,11 @@ class PriceService:
     def __init__(self, provider: PriceProvider = AWattarProvider()):
         self.provider = provider
         self.local_tz = pytz.timezone("Europe/Vienna")
+
+    async def get_strict_historical_day(self,date_str,resolution_min=15):
+        historical_day_grid(date_str,resolution_min)
+        raw = await self.provider.fetch_prices(date_str,24)
+        return map_strict_historical_day(date_str,resolution_min,raw)
 
     async def get_prices_for_optimization(
         self, 

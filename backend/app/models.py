@@ -144,6 +144,7 @@ class OptimizationInputs(BaseModel):
     num_chargers: int = Field(50, description="Number of simultaneous charging sockets available (S_max)")
     use_next_day_readiness: bool = Field(False, description="Enforce final SoC enough for next day's first trips")
     use_cyclic_soc: bool = Field(False, description="Require each bus to end the repeated 24-hour day at its initial battery energy")
+    daily_cyclic: bool = False
     charging_curve: ChargingCurve = Field(default_factory=ChargingCurve)
     operating_min_soc_mode: Literal['off', 'hard', 'soft'] = 'off'
     operating_min_soc_fraction: float = Field(0.1, ge=0, le=1, allow_inf_nan=False)
@@ -153,6 +154,8 @@ class OptimizationInputs(BaseModel):
 
     @model_validator(mode='after')
     def valid_operating_soc_band(self):
+        if self.daily_cyclic and (self.scenario != 'baseline' or not self.use_cyclic_soc):
+            raise ValueError('Daily Cyclic supports Baseline with the daily cyclic bus SoC condition enabled.')
         if self.use_cyclic_soc:
             if self.use_next_day_readiness:
                 raise ValueError('Start SoC = End SoC and Next-Day Readiness are alternative modes and cannot both be enabled.')

@@ -43,6 +43,10 @@ class ExcelExporter:
             else:
                 ExcelExporter._write_single_horizon(writer, results)
             ExcelExporter._write_charging_sites(writer, results)
+            if results.get('long_term_mode') == 'daily_cyclic':
+                pd.DataFrame([dict(date=row['date'],status=row['status'],cost_eur=row.get('reconciliation',{}).get('cost_eur'),
+                                   grid_energy_kwh=row.get('reconciliation',{}).get('grid_energy_kwh'),error=str(row.get('error','')))
+                              for row in results.get('day_records',[])]).to_excel(writer,sheet_name='Daily Run Status',index=False)
             curve = results.get('charging_curve') or results.get('run_metadata', {}).get('inputs', {}).get('charging_curve')
             if curve:
                 start = 0

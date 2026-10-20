@@ -7,6 +7,7 @@ constraints remain interval-average constraints of the existing time-grid model.
 import pulp
 
 from .opportunity_charging import potential_profiles, possible_availability
+from .optimization_progress import check_cancelled
 
 
 def band_rates(inputs, cap_kw, charger_power_kw):
@@ -56,6 +57,7 @@ def add_charging_curve(problem, inputs, powers, states, site_state=None, logs=No
         potential = possible_availability(bus, inputs)
         site_potential = potential_profiles(bus, inputs) if inputs.charging_sites else {}
         for t, available in enumerate(potential):
+            check_cancelled()
             if not available or bus.max_power_kw <= 0:
                 continue
             prefix = f'curve_b{bi}_t{t}'

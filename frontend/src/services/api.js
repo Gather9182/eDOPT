@@ -32,11 +32,12 @@ export const processExcel = async (file, roundTo30 = false, settings = null) => 
   return response.data;
 };
 
-export const runOptimization = async (inputs, {onProgress} = {}) => {
+export const runOptimization = async (inputs, {onProgress,signal} = {}) => {
   if (onProgress) return optimizationJob(inputs,{
     start:async body => (await api.post('/optimize/jobs',body,{timeout:15000})).data,
     get:async id => (await api.get(`/optimize/jobs/${id}`,{timeout:10000})).data,
-  },onProgress);
+    cancel:async id => (await api.post(`/optimize/jobs/${id}/cancel`,null,{timeout:10000})).data,
+  },onProgress,undefined,{signal});
   const response = await api.post('/optimize', inputs);
   return response.data;
 };
@@ -45,6 +46,11 @@ export const validateInputs = async (inputs) => {
   const response = await api.post('/data/validate', inputs, { params: { include_diagnostics: true } });
   return response.data;
 };
+
+export const historicalCalendar = async (start_date,end_date,resolution_min) =>
+  (await api.get('/prices/historical-calendar',{params:{start_date,end_date,resolution_min}})).data;
+export const historicalDayPrices = async (date,resolution_min) =>
+  (await api.get('/prices/historical-day',{params:{date,resolution_min}})).data;
 
 export const fetchAWattarPrices = async (date) => {
   const response = await api.get(`/prices/awattar?date=${date}`);

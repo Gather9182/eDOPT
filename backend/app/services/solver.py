@@ -11,7 +11,7 @@ from .opportunity_charging import add_opportunity_variables, link_visit_charging
 from .soc_policy import solve_soc_policy, soc_policy_results, preferred_maximum, minimum_energy, reference_policy_issues
 from .end_conditions import end_target, add_end_condition, reference_end_issues, end_condition_results
 from .charging_curve import add_charging_curve, max_curve_energy, charging_curve_results
-from .optimization_progress import report_progress
+from .optimization_progress import report_progress, check_cancelled
 from .automatic_charging import add_automatic_charging
 
 def simulate_baseline_load(inputs: OptimizationInputs, with_issues=False, minimum_soc_deviation=None):
@@ -85,9 +85,14 @@ def simulate_baseline_load(inputs: OptimizationInputs, with_issues=False, minimu
 
 def _validate_bus_inputs(inputs: OptimizationInputs):
     validate_sites(inputs)
+    if inputs.daily_cyclic:
+        for bus in inputs.buses:
+            if any(visit.pause_start_min < 0 or visit.pause_end_min > 1440 for visit in bus.opportunity_visits):
+                raise ValueError(f'Route {bus.id}: Daily Cyclic does not support optional charging visits crossing midnight. Use Flexible Long-Term or configure within-day visits; no options were silently removed.')
     num_periods = len(inputs.electricity_prices)
 
     for bus in inputs.buses:
+        check_cancelled()
         if len(bus.availability) != num_periods:
             raise ValueError(
                 f"Bus {bus.id}: availability length {len(bus.availability)} "
@@ -554,16 +559,16 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
         baseline_feasible=not baseline_issues,
         baseline_issues=baseline_issues,
         scenario=inputs.scenario,
-        total_cost_eur=round(float(total_cost), 2),
-        total_energy_mwh=round(float(total_energy_kwh) / 1000.0, 3),
+        total_cost_eur=round(float(total_cost), 6),
+        total_energy_mwh=round(float(total_energy_kwh) / 1000.0, 6),
         peak_load_kw=round(float(np.max(import_prof)), 2),
         schedules=schedules,
         soc_profiles=soc_profiles,
         charging_curve=charging_curve_results(inputs),
-        aggregated_load_profile=[round(x, 1) for x in aggregated_load],
+        aggregated_load_profile=[round(x, 4) for x in aggregated_load],
         grid_import_profile=import_prof,
         baseline_aggregated_load_profile=[round(x, 1) for x in baseline_load.tolist()],
-        baseline_cost_eur=round(float(baseline_cost), 2),
+        baseline_cost_eur=round(float(baseline_cost), 6),
         pv_yield_profile=pv_y_prof,
         pv_used_profile=pv_u_prof,
         pv_curtailed_profile=pv_c_prof,
@@ -694,16 +699,16 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
         baseline_feasible=not baseline_issues,
         baseline_issues=baseline_issues,
         scenario=inputs.scenario,
-        total_cost_eur=round(float(total_cost_eur), 2),
-        total_energy_mwh=round(float(total_energy_kwh) / 1000.0, 3),
+        total_cost_eur=round(float(total_cost_eur), 6),
+        total_energy_mwh=round(float(total_energy_kwh) / 1000.0, 6),
         peak_load_kw=round(float(np.max(aggregated_profile)), 2),
         schedules=schedules,
         soc_profiles=soc_profiles,
         charging_curve=charging_curve_results(inputs),
-        aggregated_load_profile=[round(x, 1) for x in aggregated_profile.tolist()],
-        grid_import_profile=[round(x, 1) for x in aggregated_profile.tolist()],
+        aggregated_load_profile=[round(x, 4) for x in aggregated_profile.tolist()],
+        grid_import_profile=[round(x, 4) for x in aggregated_profile.tolist()],
         baseline_aggregated_load_profile=[round(x, 1) for x in baseline_load.tolist()],
-        baseline_cost_eur=round(float(baseline_cost), 2),
+        baseline_cost_eur=round(float(baseline_cost), 6),
         electricity_prices=inputs.electricity_prices,
         market_prices=inputs.market_prices,
         bus_diagnostics=bus_diagnostics,

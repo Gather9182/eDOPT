@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { arrivalComparison } from '../utils/arrivalComparison';
 import SocPolicyResults from '../components/SocPolicyResults';
 import EndConditionResults from '../components/EndConditionResults';
+import DailyCyclicSummary from '../components/DailyCyclicSummary';
 import ChargingCurveResults from '../components/ChargingCurveResults';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area,
@@ -2720,6 +2721,7 @@ const Results = () => {
       </div>
       
       <ExcludedRoutesNotice ids={results.run_metadata?.excluded_bus_ids} />
+      <DailyCyclicSummary results={results} />
       <ChargingSiteResults results={results} day={results.is_long_term && isDrillDown ? selectedDay : null} />
       <SocPolicyResults policy={results.soc_policy} />
       <EndConditionResults condition={results.end_condition} />

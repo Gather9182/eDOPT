@@ -5,10 +5,12 @@ import {chargingCurveIssues} from '../utils/chargingCurve';
 import {socPolicyInputs, socPolicyIssues, mergeSocPolicies, endConditionPatch, endConditionIssues} from '../utils/socPolicy';
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Zap, Terminal, Battery, Clock, CheckCircle, AlertCircle, Loader2, Table as TableIcon, Info, Save, ChevronDown, ChevronUp, Sun, Layers, LayoutDashboard, Activity, Sliders, MapPin, Navigation } from 'lucide-react';
-import { runOptimization as callOptimizeApi, validateInputs, API_BASE } from '../services/api';
+import { runOptimization as callOptimizeApi, validateInputs, API_BASE, historicalCalendar, historicalDayPrices } from '../services/api';
+import {buildSolverInputs,effectivePrices} from '../utils/solverInputs';
+import {dailyConfigurationIssues,runDailyCyclic,aggregateDailyRun} from '../utils/dailyCyclic';
 import { generateDefaultPrices } from '../utils/dataMapping';
 import { getItem, setItem } from '../utils/db';
-import { chargingInputs, locationProfilesForHorizon } from '../utils/charging';
+import { chargingInputs } from '../utils/charging';
 import { optimizationFleet, excludableBusIds, diagnosedRouteIds, fleetRunMetadata } from '../utils/optimizationFleet';
 import ExcludedRoutesNotice from '../components/ExcludedRoutesNotice';
 import ValidationStatusPanel from '../components/ValidationStatusPanel';
@@ -16,6 +18,7 @@ import OptimizationFailurePanel from '../components/OptimizationFailurePanel';
 import { inputsWithRealizedVisits, resolvedOpportunityConfig, opportunityImportNeedsRefresh } from '../utils/opportunity';
 import { captureValidationContext, validationDiagnostic, optimizationDiagnostic, diagnosticClone, diagnosticFiles, diagnosticZip } from '../utils/diagnosticExport';
 import { archiveChunkRequest, runAuditMetadata } from '../utils/resultAnalysisExport';
+import {checkOptimizationCancelled} from '../utils/optimizationProgress';
 
 const InfoTooltip = ({ title, text, align = 'center' }) => (
   <div className="tooltip-container">
@@ -88,6 +91,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
   const [optimizationFailure, setOptimizationFailure] = useState(null);
   const optimizationAttemptRef = useRef(null);
   const analysisRunRef = useRef(null);
+  const runAbortRef = useRef(null);
+  const [isCancelling,setIsCancelling] = useState(false);
   const logsRef = useRef([]);
   const validationVersionRef = useRef(0);
   const [isValidating, setIsValidating] = useState(false);
@@ -96,6 +101,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
   const [showInputData, setShowInputData] = useState(false);
   const [showCompareAllToast, setShowCompareAllToast] = useState(false);
   const [simulationMode, setSimulationMode] = useState('single');
+  const [dailyRunSummary,setDailyRunSummary] = useState(null);
   const [longTermConfig, setLongTermConfig] = useState(() => {
     const today = new Date();
     const sevenDaysAgo = new Date();
@@ -236,6 +242,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     activeBuses.map(bus => bus.id));
 
   const requestOptimization = async (inputs, attempt = {}) => {
+    checkOptimizationCancelled(runAbortRef.current?.signal);
     optimizationAttemptRef.current = {context:{...(analysisRunRef.current?.context || failureContext()),checked_at:new Date().toISOString()},request:diagnosticClone(inputs),
       attempt:{scenario:inputs.scenario,mode:simulationMode,...attempt}};
     setSolverPending(true);
@@ -243,7 +250,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     let lastEventSequence = 0;
     let result;
     try {
-      result = await callOptimizeApi(inputs,{onProgress:state => {
+      result = await callOptimizeApi(inputs,{signal:runAbortRef.current?.signal,onProgress:state => {
         setLiveProgress(state);
         for (const event of state.events || []) {
           if (event.sequence > lastEventSequence) {
@@ -259,22 +266,25 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       const record = await archiveChunkRequest(optimizationAttemptRef.current.request,attempt,analysisRunRef.current.id,setItem,result);
       analysisRunRef.current.requests.push(record);
       if (record.status !== 'stored') addLog(`Analysis archive warning: Exact inputs for chunk ${attempt.chunk_number} could not be saved: ${record.error}`);
+      if (simulationMode === 'long_term') await setItem(`optimization_checkpoint_${analysisRunRef.current.id}_${attempt.chunk_number}`,{
+        request:optimizationAttemptRef.current.request,result,attempt,run_id:analysisRunRef.current.id});
     }
+    checkOptimizationCancelled(runAbortRef.current?.signal);
     optimizationAttemptRef.current = null;
     return result;
   };
 
   const recordOptimizationFailure = error => {
+    if (error.code === 'OPTIMIZATION_CANCELLED') {
+      setOptimizationFailure(null);
+      setOptimizationError('Optimization cancelled. Completed Daily Cyclic days remain available; the interrupted job was not accepted as a result.');
+      addLog('Optimization cancelled by the user.');
+      return;
+    }
     const captured = optimizationAttemptRef.current || {context:failureContext(),request:null,attempt:{scenario,mode:simulationMode,phase:'outside_solver_request'}};
     const diagnostic = optimizationDiagnostic(captured.context,captured.request,error,captured.attempt,validationState?.diagnostic || null,logsRef.current);
     setOptimizationFailure(diagnostic);
     setOptimizationError(diagnostic.failure.message);
-  };
-
-  const tileVector = (source, targetLength) => {
-    if (!source || source.length === 0) return Array(targetLength).fill(0);
-    if (source.length === targetLength) return source;
-    return Array.from({ length: targetLength }, (_, i) => source[i % source.length]);
   };
 
   const runOptimization = async () => {
@@ -300,19 +310,9 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         pricing_mode: 'effective'
       };
       
-      finalPrices = projectData.pricing;
-      if (priceAssumptions.pricing_mode === 'effective') {
-        const fixedAdditions = (priceAssumptions.supplier_markup || 0) + 
-                              (priceAssumptions.variable_network_charge || 0) + 
-                              (priceAssumptions.other_variable_levies || 0) + 
-                              (priceAssumptions.electricity_tax || 0);
-        const vatMultiplier = priceAssumptions.use_vat ? 1.2 : 1.0;
-        finalPrices = projectData.pricing.map(p => (p + fixedAdditions) * vatMultiplier);
-        addLog(`Pricing Mode: EFFECTIVE (${priceAssumptions.use_vat ? 'Incl. 20% VAT' : 'Excl. VAT'})`);
-      } else {
-        addLog('Pricing Mode: SPOT (Wholesale only)');
-      }
-      
+      finalPrices = effectivePrices(projectData.pricing,priceAssumptions);
+      addLog(`Pricing Mode: ${priceAssumptions.pricing_mode || 'effective'}`);
+
       if (projectData.pricing.length > 0 && projectData.pricing.length < numPeriods) {
         addLog('Note: Price data is shorter than horizon. Repeating price pattern.');
       }
@@ -323,46 +323,10 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
 
     const buildInputsForScenario = (targetScenario) => {
       if (isRealData) {
-        return {
-          scenario: targetScenario,
-          ...chargingInputs(projectData),
-          ...socPolicyInputs(localSettings),
-          planning_horizon_hours: localSettings.planning_horizon,
-          time_step_minutes: localSettings.time_resolution,
-          buses: activeBuses.map(bus => {
-            const initFrac = projectData.meta.initial_soc_fraction ?? 1.0;
-            const reserveFrac = projectData.meta.min_final_soc_fraction ?? 0.2;
-            const battery = bus.max_battery_capacity_kwh || projectData.constraints.max_battery_capacity_kwh || 350;
-            return {
-              ...bus,
-              initial_soc_kwh: battery * initFrac,
-              min_final_soc_kwh: battery * reserveFrac,
-              efficiency: bus.efficiency || localSettings.efficiency,
-              max_power_kw: bus.max_power_kw || localSettings.max_power_per_bus,
-              availability: tileVector(bus.availability, numPeriods),
-              trip_energy_profile_kwh: tileVector(bus.trip_energy_profile_kwh, numPeriods),
-              ...locationProfilesForHorizon(bus, numPeriods, localSettings.time_resolution, projectData.meta.time_resolution)
-            };
-          }),
-          electricity_prices: tileVector(finalPrices, numPeriods),
-          market_prices: tileVector(projectData.pricing, numPeriods),
-          charger_capacity_kw: localSettings.charger_capacity_kw,
-          grid_limit_kw: localSettings.grid_limit_kw,
-          initial_soc_fraction: projectData.meta.initial_soc_fraction ?? 1.0,
-          min_final_soc_fraction: projectData.meta.min_final_soc_fraction ?? 0.2,
-          num_chargers: localSettings.num_chargers || 50,
-          use_next_day_readiness: localSettings.use_next_day_readiness,
-          pv_config: (targetScenario === 'pv' || targetScenario === 'pv_bess') ? {
-            ...pvConfig,
-            latitude: projectData.meta.latitude,
-            longitude: projectData.meta.longitude,
-            reference_date: weatherDate
-          } : null,
-          bess_config: (targetScenario === 'bess' || targetScenario === 'pv_bess') ? {
-            ...bessConfig,
-            reference_date: weatherDate
-          } : null
-        };
+        return buildSolverInputs(projectData,localSettings,{buses:activeBuses,scenario:targetScenario,
+          marketPrices:projectData.pricing,prices:finalPrices,
+          pvConfig:(targetScenario === 'pv' || targetScenario === 'pv_bess') ? {...pvConfig,latitude:projectData.meta.latitude,longitude:projectData.meta.longitude,reference_date:weatherDate} : null,
+          bessConfig:(targetScenario === 'bess' || targetScenario === 'pv_bess') ? {...bessConfig,reference_date:weatherDate} : null});
       } else {
         return {
           scenario: targetScenario,
@@ -477,12 +441,65 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     setOptimizationError(null);
     setOptimizationFailure(null);
     setDiagnosticExportError('');
+    setDailyRunSummary(null);
+    runAbortRef.current = new AbortController();
+    setIsCancelling(false);
     optimizationAttemptRef.current = null;
     analysisRunRef.current = {id:crypto.randomUUID(),context:failureContext(),requests:[]};
     if (simulationMode === 'single') {
       await runOptimization();
+    } else if (simulationMode === 'daily_cyclic') {
+      await runDailySimulation();
     } else {
       await runLongTermSimulation();
+    }
+  };
+
+  const runDailySimulation = async () => {
+    setStatus('running');setRunStartTime(Date.now());setProgress(2);
+    setLogs([]);logsRef.current=[];
+    const project=diagnosticClone(projectData),settings=diagnosticClone(localSettings);
+    const buses=optimizationFleet(project).included;
+    const keys=[];
+    const runId=analysisRunRef.current.id;
+    try {
+      const issues=dailyConfigurationIssues({...project,buses},settings,scenario);
+      if (issues.length) throw new Error(issues.map(issue=>issue.message).join(' '));
+      addLog('Validating historical calendar in Europe/Vienna. Daily Cyclic repeats the configured timetable; no calendar-day timetable changes.');
+      const {dates}=await historicalCalendar(longTermConfig.startDate,longTermConfig.endDate,settings.time_resolution);
+      const run=await runDailyCyclic({project,settings,buses,dates,
+        fetchPrices:async date=>{
+          checkOptimizationCancelled(runAbortRef.current?.signal);
+          const prices=await historicalDayPrices(date,settings.time_resolution);
+          checkOptimizationCancelled(runAbortRef.current?.signal);
+          return prices;
+        },optimize:requestOptimization,notify:addLog,
+        checkpoint:async record=>{
+          const key=`daily-cyclic-${runId}-${record.date}`;
+          await setItem(key,record);keys.push({date:record.date,key,status:record.status});
+          await setItem(`daily-cyclic-${runId}-manifest`,{run_id:runId,dates,project,settings,records:keys});
+        }});
+      const payload=aggregateDailyRun(run);
+      if (payload) {
+        payload.run_metadata={...fleetRunMetadata(project),...runAuditMetadata(analysisRunRef.current.context,validationState?.diagnostic,logsRef.current,analysisRunRef.current.requests),
+          run_id:runId,timestamp:new Date().toISOString(),scenario:'baseline',is_long_term:true,long_term_mode:'daily_cyclic',
+          settings:{...settings,longTermConfig:{...longTermConfig,chunkSizeHours:24}},
+          inputs:{...run.records[0].request,start_date:longTermConfig.startDate,end_date:longTermConfig.endDate},daily_checkpoints:keys};
+        await setItem('optimization_results',payload);
+      }
+      if (run.status!=='completed') {
+        const failed=run.records.find(row=>row.status==='failed' || row.status==='cancelled');
+        optimizationAttemptRef.current ||= {context:failureContext(),request:failed.request,attempt:{date:failed.date,mode:'daily_cyclic',phase:failed.request ? 'daily_solve_or_check' : 'historical_prices'}};
+        recordOptimizationFailure(run.error);
+        setDailyRunSummary({status:run.status,date:failed.date,completed:run.records.filter(row=>row.status==='completed').length});
+        addLog(`Daily Cyclic stopped at ${failed.date}. Completed days remain saved; no routes were excluded.`);
+        setStatus('ready');return;
+      }
+      addLog(`Daily Cyclic completed: ${dates.length} verified daily results saved.`);
+      setStatus('success');onComplete('results');
+    } catch (error) {
+      addLog(`Daily Cyclic error: ${error.response?.data?.detail || error.message}`);
+      recordOptimizationFailure(error);setStatus('ready');
     }
   };
 
@@ -513,6 +530,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
 
       if (!contextRes.ok) throw new Error('Failed to fetch historical context data.');
       const contextData = await contextRes.json();
+      checkOptimizationCancelled(runAbortRef.current?.signal);
       setProgress(10);
       const startDt = new Date(longTermConfig.startDate);
       const endDt = new Date(longTermConfig.endDate);
@@ -533,11 +551,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       let currentBusSocs = {};
       let currentConnections = {};
       if (activeBuses.length) {
-         activeBuses.forEach(b => {
-             const initFrac = projectData.meta.initial_soc_fraction ?? 1.0;
-             const battery = b.max_battery_capacity_kwh || projectData.constraints.max_battery_capacity_kwh || 350;
-             currentBusSocs[b.id] = battery * initFrac;
-         });
+         currentBusSocs = Object.fromEntries(buildSolverInputs(projectData,localSettings,{buses:activeBuses,hours:24}).buses.map(bus=>[bus.id,bus.initial_soc_kwh]));
       }
 
       // Arrays to accumulate results
@@ -572,6 +586,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       let totalCost = 0;
       let totalBaselineCost = 0;
       let totalBasicOptimizedCost = 0;
+      let baselineComparable = true, basicComparable = true;
       let totalEnergyMwh = 0;
       let peakLoadKw = 0;
       let totalPvGeneratedKwh = 0;
@@ -611,62 +626,22 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         const chunkTemp = getPaddedSlice(contextData.temperatures, startIdx, endIdx);
 
         // Prepare Inputs
-        const buildInputs = () => {
-          return {
-            scenario: scenario,
-            ...chargingInputs(projectData),
-            ...socPolicyInputs(localSettings),
-            horizon_start_minute: startIdx * localSettings.time_resolution,
-            cyclic_connections: false,
-            planning_horizon_hours: chunkPeriods * localSettings.time_resolution / 60,
-            time_step_minutes: localSettings.time_resolution,
-            buses: activeBuses.map(bus => {
-              const reserveFrac = projectData.meta.min_final_soc_fraction ?? 0.2;
-              const battery = bus.max_battery_capacity_kwh || projectData.constraints.max_battery_capacity_kwh || 350;
-              return {
-                ...bus,
-                initial_soc_kwh: currentBusSocs[bus.id] !== undefined ? currentBusSocs[bus.id] : battery,
-                min_final_soc_kwh: battery * reserveFrac,
-                efficiency: bus.efficiency || localSettings.efficiency,
-                max_power_kw: bus.max_power_kw || localSettings.max_power_per_bus,
-                availability: tileVector(bus.availability, chunkPeriods),
-                trip_energy_profile_kwh: tileVector(bus.trip_energy_profile_kwh, chunkPeriods),
-                ...locationProfilesForHorizon(bus, chunkPeriods, localSettings.time_resolution, projectData.meta.time_resolution),
-                initial_connection_site: currentConnections[bus.id] ?? null
-              };
-            }),
-            electricity_prices: chunkPrices,
-            market_prices: chunkPrices,
-            charger_capacity_kw: localSettings.charger_capacity_kw,
-            grid_limit_kw: localSettings.grid_limit_kw,
-            initial_soc_fraction: 1.0,
-            min_final_soc_fraction: 0.2,
-            num_chargers: localSettings.num_chargers || 50,
-            use_next_day_readiness: localSettings.use_next_day_readiness,
-            pv_config: (scenario === 'pv' || scenario === 'pv_bess') ? {
-              ...pvConfig,
-              profile_kwh: chunkPv,
-              latitude: projectData.meta.latitude,
-              longitude: projectData.meta.longitude,
-            } : null,
-            bess_config: (scenario === 'bess' || scenario === 'pv_bess') ? {
-              ...bessConfig,
-              initial_soc_kwh: currentBessSoc,
-              ambient_temperature_profile: chunkTemp
-            } : null
-          };
-        };
+        const buildInputs = () => buildSolverInputs(projectData,localSettings,{buses:activeBuses,scenario,
+          hours:chunkPeriods*localSettings.time_resolution/60,horizonStart:startIdx*localSettings.time_resolution,
+          cyclicConnections:false,initialEnergies:currentBusSocs,initialConnections:i ? currentConnections : undefined,
+          marketPrices:chunkPrices,prices:effectivePrices(chunkPrices,projectData.meta.price_assumptions),
+          pvConfig:(scenario === 'pv' || scenario === 'pv_bess') ? {...pvConfig,profile_kwh:chunkPv,latitude:projectData.meta.latitude,longitude:projectData.meta.longitude} : null,
+          bessConfig:(scenario === 'bess' || scenario === 'pv_bess') ? {...bessConfig,initial_soc_kwh:currentBessSoc,ambient_temperature_profile:chunkTemp} : null});
 
-        const res = await requestOptimization(buildInputs(),{chunk_number:i+1,
+        const chunkRequest=buildInputs();
+        const res = await requestOptimization(chunkRequest,{chunk_number:i+1,
           global_start_period:startIdx,global_start_minute:startIdx*localSettings.time_resolution,
           start_date:longTermConfig.startDate,end_date:longTermConfig.endDate});
         activeBuses.forEach(bus => {
           (aggVisitEnergy[bus.id] ||= []).push(...(res.additional_trip_energy_profiles?.[bus.id] || Array(chunkPeriods).fill(0)));
-          (aggAdditionalTrips[bus.id] ||= []).push(...(res.additional_trips?.[bus.id] || []).map(trip => ({...trip,start_min:trip.start_min+startIdx*localSettings.time_resolution,end_min:trip.end_min+startIdx*localSettings.time_resolution})));
+          (aggAdditionalTrips[bus.id] ||= []).push(...(res.additional_trips?.[bus.id] || []));
         });
-        aggVisits.push(...(res.opportunity_charging_visits || []).map(visit => ({...visit,
-          departure_min:visit.departure_min+startIdx*localSettings.time_resolution,charger_arrival_min:visit.charger_arrival_min+startIdx*localSettings.time_resolution,
-          return_departure_min:visit.return_departure_min+startIdx*localSettings.time_resolution,return_arrival_min:visit.return_arrival_min+startIdx*localSettings.time_resolution})));
+        aggVisits.push(...(res.opportunity_charging_visits || []));
         currentConnections = res.final_connections || {};
         appendProfiles(aggConnections, res.connection_schedules);
         appendProfiles(aggSiteLoads, res.site_load_profiles);
@@ -701,7 +676,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         agg_pv_to_bus.push(...(res.pv_to_bus_profile || []));
         agg_grid_to_bus.push(...(res.grid_to_bus_profile || []));
         agg_bess_to_bus.push(...(res.bess_to_bus_profile || []));
-        agg_prices.push(...chunkPrices);
+        agg_prices.push(...res.electricity_prices);
         agg_market_prices.push(...(res.market_prices || chunkPrices));
         agg_temp.push(...chunkTemp);
         agg_cell_temp.push(...(res.bess_cell_temperature_profile_c || []));
@@ -760,8 +735,9 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
               let status_flag = diag.status_flag || 'healthy';
               let diagnostic_reason = diag.diagnostic_reason || 'Charging requirement met.';
               
-              const final_threshold = (busInput?.min_final_soc_kwh !== undefined ? busInput.min_final_soc_kwh : battery * (projectData.meta?.min_final_soc_fraction || 0.2)) + 
-                                     (d === daysInThisChunk - 1 ? (busInput?.next_day_required_energy_kwh || 0) : 0);
+              const resolvedBus=chunkRequest.buses.find(bus=>String(bus.id)===String(busId));
+              const final_threshold = d === daysInThisChunk - 1 ? resolvedBus.min_final_soc_kwh +
+                (localSettings.use_next_day_readiness ? (resolvedBus.next_day_required_energy_kwh ?? 0) : 0) : 0;
               
               if (busSoc.some(v => v < -0.01)) {
                 status_flag = 'critical';
@@ -789,7 +765,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                 total_charged_energy_kwh,
                 is_charged: total_charged_energy_kwh > 0.1,
                 total_distance_km: tripsForDay.reduce((sum,trip) => sum+(trip.dist_m || 0)/1000,0)+
-                  (res.additional_trips?.[busId] || []).filter(trip => trip.start_min >= d*1440 && trip.start_min < (d+1)*1440).reduce((sum,trip) => sum+(trip.dist_m || 0)/1000,0),
+                  (res.additional_trips?.[busId] || []).filter(trip => trip.start_min >= startIdx*localSettings.time_resolution+d*1440 && trip.start_min < startIdx*localSettings.time_resolution+(d+1)*1440).reduce((sum,trip) => sum+(trip.dist_m || 0)/1000,0),
                 vehicle_type: diag.vehicle_type || busInput?.vehicle_type || 'Bus',
                 status_flag,
                 diagnostic_reason
@@ -800,6 +776,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         }
         
         totalCost += res.total_cost_eur;
+        baselineComparable &&= res.baseline_feasible === true && Number.isFinite(res.baseline_cost_eur);
+        basicComparable &&= Number.isFinite(res.basic_optimized_cost_eur);
         totalBaselineCost += (res.baseline_cost_eur || 0);
         totalBasicOptimizedCost += (res.basic_optimized_cost_eur || 0);
         totalEnergyMwh += res.total_energy_mwh;
@@ -825,12 +803,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         site_load_profiles: aggSiteLoads,
         site_grid_import_profiles: aggSiteGrids,
         site_occupied_connectors: aggOccupied,
-        baseline_feasible: baselineIssues.size === 0,
+        baseline_feasible: baselineComparable && baselineIssues.size === 0,
         baseline_issues: [...baselineIssues],
         scenario: scenario,
         total_cost_eur: totalCost,
-        baseline_cost_eur: totalBaselineCost,
-        basic_optimized_cost_eur: totalBasicOptimizedCost,
+        baseline_cost_eur: baselineComparable ? totalBaselineCost : null,
+        basic_optimized_cost_eur: basicComparable ? totalBasicOptimizedCost : null,
         total_energy_mwh: totalEnergyMwh,
         peak_load_kw: peakLoadKw,
         aggregated_load_profile: agg_load,
@@ -869,6 +847,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             timestamp: new Date().toISOString(),
             scenario: scenario,
             is_long_term: true,
+            long_term_mode:'flexible',historical_prices_verified:false,
             duration_days: totalDays,
             settings: { ...localSettings, longTermConfig },
             inputs: {
@@ -876,10 +855,11 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                 ...socPolicyInputs(localSettings),
                 grid_limit_kw: localSettings.grid_limit_kw,
                 num_chargers: localSettings.num_chargers,
-                initial_soc_fraction: 1.0,
-                min_final_soc_fraction: 0.2,
+                initial_soc_fraction: projectData.meta.initial_soc_fraction ?? 1,
+                min_final_soc_fraction: projectData.meta.min_final_soc_fraction ?? .2,
+                charger_capacity_kw:localSettings.charger_capacity_kw,
                 time_step_minutes: localSettings.time_resolution,
-                buses: activeBuses,
+                buses: buildSolverInputs(projectData,localSettings,{buses:activeBuses,hours:24}).buses,
                 pv_config: pvConfig,
                 bess_config: bessConfig,
                 start_date: longTermConfig.startDate,
@@ -890,11 +870,15 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
 
       setTimeout(async () => {
         try {
+          checkOptimizationCancelled(runAbortRef.current?.signal);
           addLog('Finalizing and saving results...');
           await setItem('optimization_results', finalPayload);
           addLog('Results successfully saved.');
           onComplete('results');
         } catch (error) {
+          if (error.code === 'OPTIMIZATION_CANCELLED') {
+            recordOptimizationFailure(error);setStatus('ready');return;
+          }
           addLog(`Finalization Error: ${error.message}`);
           console.error("Storage failed:", error);
           
@@ -942,7 +926,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     const recordValidation = (result, request = null, origin = 'backend', transportError = null) => {
       setValidationState({ key, result, diagnostic:validationDiagnostic(context, result, request, origin, transportError) });
     };
-    const policyIssues = [...socPolicyIssues(localSettings), ...endConditionIssues(localSettings, simulationMode), ...chargingCurveIssues(localSettings)];
+    const policyIssues = [...socPolicyIssues(localSettings), ...endConditionIssues(localSettings, simulationMode), ...chargingCurveIssues(localSettings),
+      ...(simulationMode === 'daily_cyclic' ? dailyConfigurationIssues({...projectData,buses:busesToValidate},localSettings,scenario) : [])];
     if (policyIssues.length) {
       recordValidation({status:'invalid',issues:policyIssues}, null, 'frontend');
       setIsValidating(false);
@@ -961,47 +946,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     
     let inputs = null;
     try {
-      const validationHours = simulationMode === 'long_term' ? longTermConfig.chunkSizeHours : localSettings.planning_horizon;
-      const numPeriods = (validationHours * 60) / localSettings.time_resolution;
-      inputs = {
-        scenario: scenario,
-        ...chargingInputs(projectData),
-        ...socPolicyInputs(localSettings),
-        planning_horizon_hours: validationHours,
-        cyclic_connections: simulationMode === 'single',
-        time_step_minutes: localSettings.time_resolution,
-        buses: busesToValidate.map(bus => {
-            const initFrac = projectData.meta.initial_soc_fraction ?? 1.0;
-            const reserveFrac = projectData.meta.min_final_soc_fraction ?? 0.2;
-            const battery = bus.max_battery_capacity_kwh || projectData.constraints.max_battery_capacity_kwh || 350;
-          
-            return {
-              ...bus,
-              initial_soc_kwh: battery * initFrac,
-              min_final_soc_kwh: battery * reserveFrac,
-              efficiency: bus.efficiency || localSettings.efficiency,
-              max_power_kw: bus.max_power_kw || localSettings.max_power_per_bus,
-              consumption_wh_m: bus.consumption_wh_m || localSettings.consumption_wh_m,
-              availability: tileVector(bus.availability, numPeriods),
-              trip_energy_profile_kwh: tileVector(bus.trip_energy_profile_kwh, numPeriods),
-              ...locationProfilesForHorizon(bus, numPeriods, localSettings.time_resolution, projectData.meta.time_resolution)
-            };
-        }),
-        electricity_prices: tileVector(projectData.pricing, numPeriods),
-        charger_capacity_kw: localSettings.charger_capacity_kw,
-        grid_limit_kw: localSettings.grid_limit_kw,
-        use_next_day_readiness: localSettings.use_next_day_readiness,
-        pv_config: (scenario !== 'baseline') ? {
-          ...pvConfig,
-          latitude: projectData.meta.latitude,
-          longitude: projectData.meta.longitude,
-          reference_date: weatherDate
-        } : null,
-        bess_config: (scenario === 'bess' || scenario === 'pv_bess') ? {
-          ...bessConfig,
-          reference_date: weatherDate
-        } : null
-      };
+      if (simulationMode === 'daily_cyclic') await historicalCalendar(longTermConfig.startDate,longTermConfig.endDate,localSettings.time_resolution);
+      const validationHours = simulationMode === 'daily_cyclic' ? 24 : simulationMode === 'long_term' ? longTermConfig.chunkSizeHours : localSettings.planning_horizon;
+      inputs = buildSolverInputs(projectData,localSettings,{buses:busesToValidate,scenario,hours:validationHours,
+        daily:simulationMode === 'daily_cyclic',cyclicConnections:simulationMode !== 'long_term',
+        pvConfig:(scenario === 'pv' || scenario === 'pv_bess') ? {...pvConfig,latitude:projectData.meta.latitude,longitude:projectData.meta.longitude,reference_date:weatherDate} : null,
+        bessConfig:(scenario === 'bess' || scenario === 'pv_bess') ? {...bessConfig,reference_date:weatherDate} : null});
 
       const result = await validateInputs(inputs);
       if (version !== validationVersionRef.current) return;
@@ -1456,8 +1406,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                     <input 
                       type="number"
                       className="form-input h-9 text-xs"
-                      value={localSettings.planning_horizon}
-                      disabled={simulationMode === 'long_term' || localSettings.use_cyclic_soc}
+                      value={simulationMode === 'daily_cyclic' ? 24 : localSettings.planning_horizon}
+                      disabled={simulationMode !== 'single' || localSettings.use_cyclic_soc}
                       onChange={(e) => setLocalSettings(prev => ({ ...prev, planning_horizon: Number(e.target.value) }))}
                     />
                   </div>
@@ -1523,12 +1473,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                   </div>
                   <div className="flex h-9 items-center">
                     <button 
-                      disabled={localSettings.use_cyclic_soc}
+                      disabled={localSettings.use_cyclic_soc || simulationMode === 'daily_cyclic'}
                       onClick={() => updateSocSettings({use_next_day_readiness: !localSettings.use_next_day_readiness})}
-                      className={`chart-toggle-pill ${localSettings.use_next_day_readiness ? 'active' : ''}`}
+                      className={`chart-toggle-pill ${simulationMode !== 'daily_cyclic' && localSettings.use_next_day_readiness ? 'active' : ''}`}
                       style={{ '--pill-color': 'var(--primary)', width: 'full', height: '36px', padding: '0 12px', flex: 1 }}
                     >
-                      <CheckCircle size={14} /> Next-Day Readiness
+                      <CheckCircle size={14} /> Next-Day Readiness{simulationMode === 'daily_cyclic' ? ' (off for Daily Cyclic)' : ''}
                     </button>
                   </div>
                 </div>
@@ -1536,10 +1486,10 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
               <p className="text-xxs text-muted opacity-40 uppercase tracking-tight mt-1 px-1">
                 Guarantees charge for tomorrow's first shifts.
               </p>
-              <label className="flex items-center gap-2 mt-4"><input type="checkbox" checked={localSettings.use_cyclic_soc}
-                disabled={!localSettings.use_cyclic_soc && (simulationMode !== 'single' || Number(localSettings.planning_horizon) !== 24)}
+              <label className="flex items-center gap-2 mt-4"><input type="checkbox" checked={simulationMode === 'daily_cyclic' || localSettings.use_cyclic_soc}
+                disabled={simulationMode === 'daily_cyclic' || !localSettings.use_cyclic_soc && (simulationMode !== 'single' || Number(localSettings.planning_horizon) !== 24)}
                 onChange={e => updateSocSettings({use_cyclic_soc:e.target.checked})} /> Start SoC = End SoC</label>
-              <p className="text-sm text-muted mt-2">Each bus must finish the repeated 24-hour day with exactly its initial battery energy. Replaces Next-Day Readiness; the separate end reserve still applies. Bus batteries only, not BESS. Available for 24-hour Short-Term runs.</p>
+              <p className="text-sm text-muted mt-2">Each bus must finish its 24-hour day with its initial battery energy. Daily Cyclic applies this every day and disables Next-Day Readiness for those requests only; saved Short-Term settings remain unchanged. The separate end reserve still applies. Bus batteries only, not BESS.</p>
             </div>
 
             <div className="card shadow-sm">
@@ -1988,7 +1938,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             <div className="flex gap-4 mb-2">
               {[
                 { id: 'single', label: 'Short-Term', icon: <Zap size={14} /> },
-                { id: 'long_term', label: 'Long-Term', icon: <Clock size={14} /> }
+                { id: 'long_term', label: 'Long-Term / Flexible', icon: <Clock size={14} /> },
+                { id: 'daily_cyclic', label: 'Long-Term / Daily Cyclic', icon: <Clock size={14} /> }
               ].map(mode => (
                 <button
                   key={mode.id}
@@ -2016,7 +1967,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
               ))}
             </div>
 
-            {simulationMode === 'long_term' && (
+            {simulationMode === 'daily_cyclic' && <p className="text-sm text-muted mt-4">Baseline only: one complete 24-hour solve per historical date, using the same configured daily timetable. Daily bus SoC equality and physical connector continuity are checked. Prices are strictly validated; DST transition days and overnight optional charging visits are not supported. No weekend/holiday timetable changes or global multi-day optimum. Run Check validates technical settings; prices are checked again for each actual day.</p>}
+            {simulationMode !== 'single' && (
               <div className="grid grid-cols-3 gap-x-4 gap-y-4 mt-4 animate-in slide-in-from-top-2 duration-300">
                 <div className="form-group mb-0">
                   <div className="flex items-center justify-between mb-1">
@@ -2048,7 +2000,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                     <InfoTooltip title="MPC Window" text="Resolution of individual optimization chunks. Larger windows allow better look-ahead but increase solve time." />
                   </div>
                   <CustomSelect
-                    value={longTermConfig.chunkSizeHours}
+                    value={simulationMode === 'daily_cyclic' ? 24 : longTermConfig.chunkSizeHours}
+                    disabled={simulationMode === 'daily_cyclic'}
                     onChange={(e) => setLongTermConfig({...longTermConfig, chunkSizeHours: parseInt(e.target.value)})}
                     className="form-input h-9 text-xs"
                   >
@@ -2085,6 +2038,9 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           </div>
 
           <div className="card shadow-lg p-6 flex flex-col items-center">
+            {dailyRunSummary && <div className="card p-4 mb-4 text-warning" role="status">Daily Cyclic stopped at {dailyRunSummary.date}. {dailyRunSummary.completed} completed days were retained. No routes were excluded and the full period is not marked successful.
+              {dailyRunSummary.completed > 0 && <button className="btn btn-outline mt-3" onClick={()=>onComplete('results')}>View saved partial results and export</button>}
+            </div>}
             {validationResult && <ValidationStatusPanel
               result={validationResult} excludableIds={excludableIds} activeBusCount={activeBuses.length}
               onExclude={handleExcludeUnavailable} onExport={() => handleExportDiagnostic('validation')}
@@ -2115,7 +2071,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                 onClick={executeSimulation}
                 disabled={isValidating || noActiveBuses || !validationResult || validationResult.status === 'invalid'}
               >
-                <Zap size={18} /> {simulationMode === 'long_term' ? 'Run Simulation' : 'Run Optimization'}
+                <Zap size={18} /> {simulationMode !== 'single' ? 'Run Simulation' : 'Run Optimization'}
               </button>
             </div>
           </div>
@@ -2133,6 +2089,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             <div className="progress-bar progress-bar-indeterminate"></div>
           </div>
           <p className="text-sm text-muted" style={{maxWidth:520,margin:'12px auto 0'}}>Live backend phases and solver evidence are shown below. The optimization gap is not a completion percentage.</p>
+          <button className="btn btn-outline mt-4" disabled={isCancelling} onClick={()=>{
+            setIsCancelling(true);
+            runAbortRef.current?.abort();
+            addLog('Cancellation requested. Stopping the active backend job and preventing further solves.');
+          }}>{isCancelling ? 'Cancelling optimization…' : 'Cancel optimization'}</button>
+          {isCancelling && <p className="text-sm text-muted mt-2">Waiting for cancellation confirmation. An active solver is stopped; preparation or data loading must finish its current operation.</p>}
           {timeLeftText && (
             <div className="time-left-text" style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '8px', fontWeight: '650', letterSpacing: '0.02em' }}>
               {timeLeftText}

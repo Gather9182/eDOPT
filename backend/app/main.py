@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from .models import OptimizationInputs, OptimizationResult
 from .services.optimization import run_optimization
-from .services.price_service import PriceService, AWattarProvider
+from .services.price_service import PriceService, AWattarProvider, historical_calendar
 from .utils.excel_processor import process_umlauf_excel, scan_umlauf_excel
 from .services.charging_sites import validate_sites
 from .services.feasibility import energy_feasibility_issues
@@ -33,6 +33,14 @@ def optimization_job_status(job_id: str):
     except KeyError:
         raise HTTPException(status_code=404,detail='Optimization job is unavailable. The backend may have restarted or the report expired. No new run was started automatically.')
 
+
+@app.post('/api/optimize/jobs/{job_id}/cancel')
+def cancel_optimization_job(job_id: str):
+    try:
+        return optimization_jobs.cancel(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404,detail='Optimization job is unavailable. Cancellation could not be confirmed.')
+
 # Configure CORS for local development
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
@@ -56,6 +64,22 @@ app.add_middleware(
 @app.get("/api/health")
 async def health_check():
     return {"status": "online", "version": "1.1.0-milp"}
+
+
+@app.get('/api/prices/historical-calendar')
+def get_historical_calendar(start_date: str,end_date: str,resolution_min: int=15):
+    try:
+        return {'dates':historical_calendar(start_date,end_date,resolution_min),'timezone':'Europe/Vienna'}
+    except ValueError as error:
+        raise HTTPException(status_code=400,detail=str(error))
+
+
+@app.get('/api/prices/historical-day')
+async def get_strict_historical_day(date: str,resolution_min: int=15):
+    try:
+        return await PriceService().get_strict_historical_day(date,resolution_min)
+    except (ValueError,KeyError,TypeError) as error:
+        raise HTTPException(status_code=400,detail=str(error))
 
 @app.post("/api/optimize", response_model=OptimizationResult)
 async def optimize_depot(inputs: OptimizationInputs):
