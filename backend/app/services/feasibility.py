@@ -26,10 +26,12 @@ def energy_feasibility_issues(inputs):
             continue
         target = bus.min_final_soc_kwh + (bus.next_day_required_energy_kwh if inputs.use_next_day_readiness else 0)
         if target > bus.max_battery_capacity_kwh + .01:
-            issues.append(dict(type='ERROR', code='BUS_FINAL_TARGET_EXCEEDS_CAPACITY', bus_id=bus.id,
-                message=f'Umlauf {bus.id}: Endreserve und Folgetagsbedarf ergeben {target:.1f} kWh, '
-                        f'die Batterie fasst aber nur {bus.max_battery_capacity_kwh:.1f} kWh. '
-                        'Batteriekapazität, Verbrauch, Folgetagsanforderung oder zusätzliche Ladeorte prüfen.'))
+            issues.append(dict(type='ERROR', code='BUS_FINAL_TARGET_EXCEEDS_CAPACITY', category='energy', bus_id=bus.id,
+                details=dict(required_energy_kwh=target, battery_capacity_kwh=bus.max_battery_capacity_kwh,
+                             reserve_kwh=bus.min_final_soc_kwh, next_day_required_energy_kwh=bus.next_day_required_energy_kwh if inputs.use_next_day_readiness else 0),
+                message=f'Route {bus.id}: The end-of-day reserve and next-day requirement total {target:.1f} kWh, '
+                        f'but the battery can hold only {bus.max_battery_capacity_kwh:.1f} kWh. '
+                        'Review battery capacity, consumption, next-day readiness or additional charging locations.'))
         soc = bus.initial_soc_kwh
         for t, energy in enumerate(bus.trip_energy_profile_kwh):
             power = 0
@@ -54,15 +56,19 @@ def energy_feasibility_issues(inputs):
             soc = min(bus.max_battery_capacity_kwh, soc + max(0, power) * dt * bus.efficiency - energy)
             if soc < -.01:
                 minute = inputs.horizon_start_minute + t * inputs.time_step_minutes
-                issues.append(dict(type='ERROR', code='BUS_ENERGY_INFEASIBLE', bus_id=bus.id,
-                    message=f'Umlauf {bus.id}: Im Zeitintervall ab {int(minute)//60%24:02d}:{int(minute)%60:02d} '
-                            f'fehlen selbst bei maximal möglicher Ladung ohne Konkurrenz mindestens {-soc:.1f} kWh '
-                            f'(Batterie {bus.max_battery_capacity_kwh:.1f} kWh). '
-                            'Batteriekapazität, Verbrauch und Ladegelegenheiten vor dieser Fahrt prüfen.'))
+                issues.append(dict(type='ERROR', code='BUS_ENERGY_INFEASIBLE', category='energy', bus_id=bus.id,
+                    details=dict(reason='trip_energy_shortfall', period=t, minute=minute, missing_energy_kwh=-soc,
+                                 battery_capacity_kwh=bus.max_battery_capacity_kwh),
+                    message=f'Route {bus.id}: At least {-soc:.1f} kWh is missing in the interval starting at '
+                            f'{int(minute)//60%24:02d}:{int(minute)%60:02d}, even with the maximum possible charging '
+                            f'and no competition (battery: {bus.max_battery_capacity_kwh:.1f} kWh). '
+                            'Review battery capacity, consumption and charging opportunities before this trip.'))
                 break
         else:
             if soc + .01 < target and target <= bus.max_battery_capacity_kwh + .01:
-                issues.append(dict(type='ERROR', code='BUS_ENERGY_INFEASIBLE', bus_id=bus.id,
-                    message=f'Umlauf {bus.id}: Selbst ohne Konkurrenz sind am Ende höchstens {soc:.1f} kWh verfügbar; '
-                            f'gefordert sind {target:.1f} kWh. Ladefenster, Leistung und Endreserve prüfen.'))
+                issues.append(dict(type='ERROR', code='BUS_ENERGY_INFEASIBLE', category='energy', bus_id=bus.id,
+                    details=dict(reason='final_energy_shortfall', maximum_final_energy_kwh=soc, required_energy_kwh=target,
+                                 missing_energy_kwh=target-soc),
+                    message=f'Route {bus.id}: At most {soc:.1f} kWh can remain at the end, even without competition; '
+                            f'{target:.1f} kWh is required. Review charging windows, power limits and the end-of-day reserve.'))
     return issues

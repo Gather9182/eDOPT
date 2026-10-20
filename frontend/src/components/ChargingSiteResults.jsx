@@ -1,4 +1,6 @@
+import CustomSelect from './CustomSelect';
 import React, { useState } from 'react';
+import { chargingOriginAt } from '../utils/chargingOrigin';
 
 export default function ChargingSiteResults({ results, day = null }) {
   const [selectedBus, setSelectedBus] = useState('');
@@ -27,9 +29,15 @@ export default function ChargingSiteResults({ results, day = null }) {
       </tbody></table></div>
     </details>}
     <details className="mt-4"><summary>Anschlussbelegung eines Busses anzeigen</summary>
-      <label>Umlauf <select aria-label="Anschlussbelegung Umlauf" className="form-input" value={bus || ''} onChange={e => setSelectedBus(e.target.value)}>{buses.map(id => <option key={id}>{id}</option>)}</select></label>
+      <label>Umlauf <CustomSelect aria-label="Anschlussbelegung Umlauf" className="form-input" value={bus || ''} onChange={e => setSelectedBus(e.target.value)}>{buses.map(id => <option key={id}>{id}</option>)}</CustomSelect></label>
       <p className="text-sm text-muted mb-2">Ein Anschluss bleibt auch bei 0 kW belegt. Angezeigt werden bis zu 192 Zeitschritte des ausgewählten Zeitraums; vollständige Daten stehen im Export.</p>
-      <div style={{ maxHeight: 320, overflow: 'auto' }}><table className="data-table"><thead><tr><th>Zeit</th><th>Anschluss am Ladeort</th><th>Ladeleistung (kW)</th></tr></thead><tbody>{(results.connection_schedules[bus] || []).slice(from,Math.min(to,from+192)).map((site, i) => { const t=from+i; const minutes=t*step; const schedule=results.is_long_term ? results.schedules_by_day?.[Math.floor(minutes/1440)]?.[bus]?.[t%(1440/step)] : results.schedules?.[bus]?.[t]; return <tr key={t}><td>Tag {Math.floor(minutes/1440)+1}, {String(Math.floor(minutes/60)%24).padStart(2,'0')}:{String(minutes%60).padStart(2,'0')}</td><td>{site ? name(site) : 'Nicht angeschlossen'}</td><td>{(schedule || 0).toFixed(1)}</td></tr>; })}</tbody></table></div>
+      <div style={{ maxHeight: 320, overflow: 'auto' }}><table className="data-table"><thead><tr><th>Zeit</th><th>Anschluss am Ladeort</th><th>Ladeleistung (kW)</th><th>Charging origin</th></tr></thead><tbody>{(results.connection_schedules[bus] || []).slice(from,Math.min(to,from+192)).map((site, i) => {
+        const t=from+i;
+        const minutes=t*step;
+        const schedule=results.is_long_term ? results.schedules_by_day?.[Math.floor(minutes/1440)]?.[bus]?.[t%(1440/step)] : results.schedules?.[bus]?.[t];
+        const origin = schedule > 0.001 ? chargingOriginAt(results,bus,minutes) : null;
+        return <tr key={t}><td>{clock(minutes)}</td><td>{site ? name(site) : 'Nicht angeschlossen'}</td><td>{(schedule || 0).toFixed(1)}</td><td>{origin ? <span title={origin.explanation} className={`charging-origin-badge charging-origin-${origin.origin}`}>{origin.badge}</span> : site ? 'Connected, not charging' : '—'}</td></tr>;
+      })}</tbody></table></div>
     </details>
   </div>;
 }

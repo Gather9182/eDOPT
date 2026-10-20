@@ -59,7 +59,7 @@ class PhysicalChargingTests(unittest.TestCase):
         data = inputs([bus('a'), bus('b')], [site(no_switch_windows=[dict(start='00:00', end='00:00')])])
         with self.assertRaisesRegex(RuntimeError, 'Infeasible'):
             self.solve(data)
-        with self.assertRaisesRegex(RuntimeError, 'Kein zulässiger Ladeplan'):
+        with self.assertRaisesRegex(RuntimeError, 'No feasible charging schedule'):
             run_offline(run_optimization(data))
 
     def test_zero_power_vehicle_keeps_connector(self):
@@ -185,6 +185,91 @@ def workbook(rows, sheet='Mo-Do Schule'):
 
 
 class ImportTests(unittest.TestCase):
+    def test_validation_messages_are_english_and_have_categories(self):
+        from app.main import validate_inputs
+        data = inputs([bus('R1', min_final_soc_kwh=30),
+                       bus('R2', availability=[0]*4, site_availability={'D':[0]*4})], use_next_day_readiness=False)
+        result = run_offline(validate_inputs(data))
+        energy = next(issue for issue in result['issues'] if issue.get('code') == 'BUS_FINAL_TARGET_EXCEEDS_CAPACITY')
+        charging = next(issue for issue in result['issues'] if issue.get('code') == 'NO_CHARGING_AVAILABILITY')
+        self.assertEqual(energy['category'], 'energy')
+        self.assertEqual(charging['category'], 'charging')
+        self.assertIn('battery can hold only 20.0 kWh', energy['message'])
+        self.assertEqual(energy['details']['required_energy_kwh'], 30)
+        for issue in result['issues']:
+            self.assertIn('code', issue)
+            self.assertIn('category', issue)
+            self.assertNotRegex(issue['message'], r'Umlauf|Batteriekapazität|Folgetagsbedarf|fehlen|prüfen')
+
+    def test_validation_diagnostics_include_normalized_defaults_all_profiles_and_all_issues(self):
+        from app.main import validate_inputs
+        data = inputs([bus('unavailable', availability=[0]*4, site_availability={'D':[0]*4})],electricity_prices=[100])
+        normal = run_offline(validate_inputs(data))
+        detailed = run_offline(validate_inputs(data, include_diagnostics=True))
+        self.assertEqual(detailed['status'], 'invalid')
+        self.assertEqual(detailed['issues'], normal['issues'])
+        self.assertNotIn('diagnostics', normal)
+        effective = detailed['diagnostics']['effective_inputs']
+        self.assertEqual(effective['num_chargers'], data.num_chargers)
+        self.assertEqual(effective['buses'][0]['site_availability']['D'], [0]*4)
+        self.assertEqual(effective['charging_sites'][0]['num_chargers'], 1)
+        self.assertIn('pydantic', detailed['diagnostics']['packages'])
+        self.assertTrue(detailed['diagnostics']['checked_at'])
+
+    def test_empty_and_distance_only_footer_rows_are_reported_without_hiding_bad_trips(self):
+        row = dict(Umlauf='U', Betriebstage='Alle Mo-Fr', Planungsbedingung='OSchule', Typ='L',
+                   von='X', nach='Y', Startzeit='08:00', Endzeit='09:00', Meter=1000, Fahrzeugtyp='EV')
+        stream = BytesIO()
+        pd.DataFrame([row, {}, dict(Meter=1000)]).to_excel(stream, sheet_name='Mo-Do Schule', index=False)
+        content = stream.getvalue()
+        self.assertEqual(scan_umlauf_excel(content)['ignored_non_trip_rows'], [3, 4])
+        result = process_umlauf_excel(content, dict(BETRIEBSTAGE=[]))
+        self.assertEqual(result['import_summary']['source_rows'], 3)
+        self.assertEqual(result['import_summary']['imported_rows'], 1)
+        self.assertEqual(result['import_summary']['ignored_non_trip_rows'], [3, 4])
+        stream = BytesIO()
+        pd.DataFrame([row, {}, {**row, 'Umlauf': None}]).to_excel(stream, sheet_name='Mo-Do Schule', index=False)
+        with self.assertRaisesRegex(ValueError, r'Excel rows \[4\]'):
+            process_umlauf_excel(stream.getvalue(), dict(BETRIEBSTAGE=[]))
+
+    def test_vehicle_groups_are_scanned_separately_and_drive_specs_when_enabled(self):
+        content = workbook([dict(Fahrzeugtyp='RB12', Fahrzeugtypgruppe='GB', Meter=100),
+                            dict(Umlauf='V', Fahrzeugtyp='RB12', Fahrzeugtypgruppe='LB', Meter=200)])
+        scan = scan_umlauf_excel(content)
+        self.assertEqual(scan['vehicle_type_groups'], ['GB', 'LB'])
+        self.assertEqual(scan['umlaeufe'][0]['vehicle_type_groups'], ['GB'])
+        settings = dict(BETRIEBSTAGE=[], VEHICLE_TYPE_SPECS={
+            'RB12': dict(consumption_wh_per_m=1, battery_capacity_kwh=200),
+            'GB': dict(consumption_wh_per_m=2, battery_capacity_kwh=400),
+            'LB': dict(consumption_wh_per_m=3, battery_capacity_kwh=500)})
+        normal = process_umlauf_excel(content, settings)
+        self.assertEqual([b['vehicle_type'] for b in normal['bus_inputs']], ['RB12', 'RB12'])
+        grouped = process_umlauf_excel(content, {**settings, 'USE_VEHICLE_TYPE_GROUP': True})
+        self.assertEqual([b['vehicle_type'] for b in grouped['bus_inputs']], ['GB', 'LB'])
+        self.assertEqual([b['max_battery_capacity_kwh'] for b in grouped['bus_inputs']], [400, 500])
+        self.assertAlmostEqual(grouped['bus_inputs'][0]['energy_demand_kwh'], .2)
+        self.assertAlmostEqual(grouped['bus_inputs'][1]['energy_demand_kwh'], .6)
+
+    def test_vehicle_groups_combine_with_first_part_and_manual_override(self):
+        content = workbook([dict(Fahrzeugtyp='RB12', Fahrzeugtypgruppe=' GB / LB ', Meter=100),
+                            dict(Umlauf='V', Fahrzeugtypgruppe='GB/LB', Meter=100)])
+        settings = dict(BETRIEBSTAGE=[], USE_VEHICLE_TYPE_GROUP=True, USE_FIRST_VEHICLE_TYPE=True,
+                        UMLAUF_VEHICLE_TYPES={'V': 'Manual/Type'}, VEHICLE_TYPE_SPECS={
+                            'GB': dict(consumption_wh_per_m=2, battery_capacity_kwh=400),
+                            'Manual/Type': dict(consumption_wh_per_m=3, battery_capacity_kwh=500)})
+        result = process_umlauf_excel(content, settings)
+        self.assertEqual([b['vehicle_type'] for b in result['bus_inputs']], ['GB', 'Manual/Type'])
+        self.assertAlmostEqual(result['bus_inputs'][1]['energy_demand_kwh'], .3)
+
+    def test_missing_vehicle_group_requires_explicit_resolution(self):
+        content = workbook([dict(Meter=100)])
+        self.assertEqual(scan_umlauf_excel(content)['vehicle_type_groups'], [])
+        with self.assertRaisesRegex(ValueError, 'Vehicle type group is missing.*2'):
+            process_umlauf_excel(content, dict(BETRIEBSTAGE=[], USE_VEHICLE_TYPE_GROUP=True))
+        result = process_umlauf_excel(content, dict(BETRIEBSTAGE=[], USE_VEHICLE_TYPE_GROUP=True,
+                                                   UMLAUF_VEHICLE_TYPES={'U': 'Manual'}))
+        self.assertEqual(result['bus_inputs'][0]['vehicle_type'], 'Manual')
+
     def test_validation_identifies_only_routes_without_charging_for_exclusion(self):
         from app.main import validate_inputs
         unavailable = bus('Bus: unavailable', availability=[0]*4, site_availability={'D':[0]*4})

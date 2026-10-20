@@ -37,7 +37,7 @@ export const runOptimization = async (inputs) => {
 };
 
 export const validateInputs = async (inputs) => {
-  const response = await api.post('/data/validate', inputs);
+  const response = await api.post('/data/validate', inputs, { params: { include_diagnostics: true } });
   return response.data;
 };
 

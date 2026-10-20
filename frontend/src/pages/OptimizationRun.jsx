@@ -1,12 +1,16 @@
+import CustomSelect from '../components/CustomSelect';
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Zap, Terminal, Battery, Clock, CheckCircle, AlertCircle, Loader2, Table as TableIcon, Info, Save, ChevronDown, ChevronUp, Sun, Layers, LayoutDashboard, Activity, Sliders, MapPin, Navigation } from 'lucide-react';
 import { runOptimization as callOptimizeApi, validateInputs, API_BASE } from '../services/api';
 import { generateDefaultPrices } from '../utils/dataMapping';
-import { setItem } from '../utils/db';
+import { getItem, setItem } from '../utils/db';
 import { chargingInputs, locationProfilesForHorizon } from '../utils/charging';
-import { optimizationFleet, excludableBusIds, fleetRunMetadata } from '../utils/optimizationFleet';
+import { optimizationFleet, excludableBusIds, diagnosedRouteIds, fleetRunMetadata } from '../utils/optimizationFleet';
 import ExcludedRoutesNotice from '../components/ExcludedRoutesNotice';
-import { inputsWithRealizedVisits, resolvedOpportunityConfig } from '../utils/opportunity';
+import ValidationStatusPanel from '../components/ValidationStatusPanel';
+import OptimizationFailurePanel from '../components/OptimizationFailurePanel';
+import { inputsWithRealizedVisits, resolvedOpportunityConfig, opportunityImportNeedsRefresh } from '../utils/opportunity';
+import { captureValidationContext, validationDiagnostic, optimizationDiagnostic, diagnosticClone, diagnosticFiles, diagnosticZip } from '../utils/diagnosticExport';
 
 const InfoTooltip = ({ title, text, align = 'center' }) => (
   <div className="tooltip-container">
@@ -70,7 +74,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     use_next_day_readiness: projectData.constraints?.use_next_day_readiness ?? true
   });
   const [validationState, setValidationState] = useState(null);
+  const [isExportingDiagnostic, setIsExportingDiagnostic] = useState(false);
+  const [diagnosticExportError, setDiagnosticExportError] = useState('');
   const [optimizationError, setOptimizationError] = useState(null);
+  const [optimizationFailure, setOptimizationFailure] = useState(null);
+  const optimizationAttemptRef = useRef(null);
+  const logsRef = useRef([]);
   const validationVersionRef = useRef(0);
   const [isValidating, setIsValidating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -213,7 +222,28 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
   }, [status]);
 
   const addLog = (msg) => {
-    setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), msg }]);
+    logsRef.current = [...logsRef.current, { time:new Date().toLocaleTimeString(), msg }];
+    setLogs(logsRef.current);
+  };
+
+  const failureContext = () => captureValidationContext(projectData,
+    {localSettings,scenario,pvConfig,bessConfig,weatherDate,simulationMode,longTermConfig,resolved_opportunity:resolvedOpportunityConfig(projectData)},
+    {browser:navigator.userAgent,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,language:navigator.language,frontend_mode:import.meta.env.MODE,api_base:API_BASE},
+    activeBuses.map(bus => bus.id));
+
+  const requestOptimization = async (inputs, attempt = {}) => {
+    optimizationAttemptRef.current = {context:failureContext(),request:diagnosticClone(inputs),
+      attempt:{scenario:inputs.scenario,mode:simulationMode,...attempt}};
+    const result = await callOptimizeApi(inputs);
+    optimizationAttemptRef.current = null;
+    return result;
+  };
+
+  const recordOptimizationFailure = error => {
+    const captured = optimizationAttemptRef.current || {context:failureContext(),request:null,attempt:{scenario,mode:simulationMode,phase:'outside_solver_request'}};
+    const diagnostic = optimizationDiagnostic(captured.context,captured.request,error,captured.attempt,validationState?.diagnostic || null,logsRef.current);
+    setOptimizationFailure(diagnostic);
+    setOptimizationError(diagnostic.failure.message);
   };
 
   const tileVector = (source, targetLength) => {
@@ -227,6 +257,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     setRunStartTime(Date.now());
     setProgress(5);
     setLogs([]);
+    logsRef.current = [];
 
     const isRealData = projectData.buses && projectData.buses.length > 0;
     const numPeriods = isRealData ? ((localSettings.planning_horizon * 60) / localSettings.time_resolution) : 96;
@@ -345,7 +376,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           setProgress(10 + (i * 20));
           
           const inputs = buildInputsForScenario(s);
-          const result = await callOptimizeApi(inputs);
+          const result = await requestOptimization(inputs,{batch_number:i+1,batch_scenarios:scenariosToRun});
           
           if (result.solver_logs && result.solver_logs.length > 0) {
             result.solver_logs.forEach(logMsg => addLog(`[${s}] ${logMsg}`));
@@ -378,7 +409,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         setProgress(30);
         
         const inputs = buildInputsForScenario(scenario);
-        const result = await callOptimizeApi(inputs);
+        const result = await requestOptimization(inputs);
         
         if (result.solver_logs && result.solver_logs.length > 0) {
           result.solver_logs.forEach(logMsg => {
@@ -406,14 +437,16 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     } catch (err) {
       addLog(`Error: ${err.message}`);
       setStatus('ready');
-      const detail = err.response?.data?.detail || err.message;
-      setOptimizationError(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      recordOptimizationFailure(err);
     }
   };
 
   const executeSimulation = async () => {
     if (noActiveBuses || isValidating || !validationResult || validationResult.status === 'invalid') return;
     setOptimizationError(null);
+    setOptimizationFailure(null);
+    setDiagnosticExportError('');
+    optimizationAttemptRef.current = null;
     if (simulationMode === 'single') {
       await runOptimization();
     } else {
@@ -426,6 +459,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     setRunStartTime(Date.now());
     setProgress(2);
     setLogs([]);
+    logsRef.current = [];
     addLog(`Starting Long-Term Simulation from ${longTermConfig.startDate} to ${longTermConfig.endDate}`);
     if (excludedBuses.length) addLog(`Excluded routes: ${excludedBuses.map(bus => bus.id).join(', ')}`);
 
@@ -588,7 +622,9 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           };
         };
 
-        const res = await callOptimizeApi(buildInputs());
+        const res = await requestOptimization(buildInputs(),{chunk_number:i+1,
+          global_start_period:startIdx,global_start_minute:startIdx*localSettings.time_resolution,
+          start_date:longTermConfig.startDate,end_date:longTermConfig.endDate});
         activeBuses.forEach(bus => {
           (aggVisitEnergy[bus.id] ||= []).push(...(res.additional_trip_energy_profiles?.[bus.id] || Array(chunkPeriods).fill(0)));
           (aggAdditionalTrips[bus.id] ||= []).push(...(res.additional_trips?.[bus.id] || []).map(trip => ({...trip,start_min:trip.start_min+startIdx*localSettings.time_resolution,end_min:trip.end_min+startIdx*localSettings.time_resolution})));
@@ -844,8 +880,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
 
     } catch (error) {
       addLog(`Long-Term Error: ${error.message}`);
-      const detail = error.response?.data?.detail || error.message;
-      setOptimizationError(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      recordOptimizationFailure(error);
       setStatus('ready');
       setProgress(0);
     }
@@ -855,75 +890,111 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     const version = ++validationVersionRef.current;
     const key = validationKeyFor(busesToValidate);
     setValidationState(null);
-    setOptimizationError(null);
     setIsValidating(true);
+    setDiagnosticExportError('');
     addLog('Starting plausibility check...');
-    const currentOpportunity = resolvedOpportunityConfig(projectData);
-    if (currentOpportunity.enabled && projectData.meta.opportunity_import_signature !== JSON.stringify(currentOpportunity)) {
-      setValidationState({key,result:{status:'invalid',issues:[{type:'ERROR',message:'Das Mapping oder die Einstellungen der Zusatzladefahrten wurden geändert. Bitte unter Input Data mit „Continue to Settings“ neu verarbeiten.'}]}});
+    const context = captureValidationContext(projectData,
+      { localSettings, scenario, pvConfig, bessConfig, weatherDate, simulationMode, longTermConfig,
+        resolved_opportunity:resolvedOpportunityConfig(projectData) },
+      { browser:navigator.userAgent, timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,
+        language:navigator.language, frontend_mode:import.meta.env.MODE, api_base:API_BASE },
+      busesToValidate.map(bus => bus.id));
+    const recordValidation = (result, request = null, origin = 'backend', transportError = null) => {
+      setValidationState({ key, result, diagnostic:validationDiagnostic(context, result, request, origin, transportError) });
+    };
+    if (opportunityImportNeedsRefresh(projectData)) {
+      recordValidation({status:'invalid',issues:[{type:'ERROR',code:'TIMETABLE_REPROCESS_REQUIRED',category:'infrastructure',message:'The mapping or additional charging trip settings have changed. Reprocess the timetable under Input Data using Continue to Settings.'}]}, null, 'frontend');
       setIsValidating(false);
       return;
     }
     if (projectData.buses.length && !busesToValidate.length) {
-      setValidationState({ key, result: { status: 'invalid', issues: [{ type: 'ERROR', message: 'Es muss mindestens ein Umlauf für die Optimierung eingeschlossen sein.' }] } });
+      recordValidation({ status: 'invalid', issues: [{ type: 'ERROR', code:'NO_ROUTES_INCLUDED', category:'data', message: 'At least one route must be included in the optimization.' }] }, null, 'frontend');
       setIsValidating(false);
       return;
     }
     
-    const validationHours = simulationMode === 'long_term' ? longTermConfig.chunkSizeHours : localSettings.planning_horizon;
-    const numPeriods = (validationHours * 60) / localSettings.time_resolution;
-    const inputs = {
-      scenario: scenario,
-      ...chargingInputs(projectData),
-      planning_horizon_hours: validationHours,
-      cyclic_connections: simulationMode === 'single',
-      time_step_minutes: localSettings.time_resolution,
-      buses: busesToValidate.map(bus => {
-          const initFrac = projectData.meta.initial_soc_fraction ?? 1.0;
-          const reserveFrac = projectData.meta.min_final_soc_fraction ?? 0.2;
-          const battery = bus.max_battery_capacity_kwh || projectData.constraints.max_battery_capacity_kwh || 350;
-          
-          return {
-            ...bus,
-            initial_soc_kwh: battery * initFrac,
-            min_final_soc_kwh: battery * reserveFrac,
-            efficiency: bus.efficiency || localSettings.efficiency,
-            max_power_kw: bus.max_power_kw || localSettings.max_power_per_bus,
-            consumption_wh_m: bus.consumption_wh_m || localSettings.consumption_wh_m,
-            availability: tileVector(bus.availability, numPeriods),
-            trip_energy_profile_kwh: tileVector(bus.trip_energy_profile_kwh, numPeriods),
-            ...locationProfilesForHorizon(bus, numPeriods, localSettings.time_resolution, projectData.meta.time_resolution)
-          };
-      }),
-      electricity_prices: tileVector(projectData.pricing, numPeriods),
-      charger_capacity_kw: localSettings.charger_capacity_kw,
-      grid_limit_kw: localSettings.grid_limit_kw,
-      use_next_day_readiness: localSettings.use_next_day_readiness,
-      pv_config: (scenario !== 'baseline') ? {
-        ...pvConfig,
-        latitude: projectData.meta.latitude,
-        longitude: projectData.meta.longitude,
-        reference_date: weatherDate
-      } : null,
-      bess_config: (scenario === 'bess' || scenario === 'pv_bess') ? {
-        ...bessConfig,
-        reference_date: weatherDate
-      } : null
-    };
-
+    let inputs = null;
     try {
+      const validationHours = simulationMode === 'long_term' ? longTermConfig.chunkSizeHours : localSettings.planning_horizon;
+      const numPeriods = (validationHours * 60) / localSettings.time_resolution;
+      inputs = {
+        scenario: scenario,
+        ...chargingInputs(projectData),
+        planning_horizon_hours: validationHours,
+        cyclic_connections: simulationMode === 'single',
+        time_step_minutes: localSettings.time_resolution,
+        buses: busesToValidate.map(bus => {
+            const initFrac = projectData.meta.initial_soc_fraction ?? 1.0;
+            const reserveFrac = projectData.meta.min_final_soc_fraction ?? 0.2;
+            const battery = bus.max_battery_capacity_kwh || projectData.constraints.max_battery_capacity_kwh || 350;
+          
+            return {
+              ...bus,
+              initial_soc_kwh: battery * initFrac,
+              min_final_soc_kwh: battery * reserveFrac,
+              efficiency: bus.efficiency || localSettings.efficiency,
+              max_power_kw: bus.max_power_kw || localSettings.max_power_per_bus,
+              consumption_wh_m: bus.consumption_wh_m || localSettings.consumption_wh_m,
+              availability: tileVector(bus.availability, numPeriods),
+              trip_energy_profile_kwh: tileVector(bus.trip_energy_profile_kwh, numPeriods),
+              ...locationProfilesForHorizon(bus, numPeriods, localSettings.time_resolution, projectData.meta.time_resolution)
+            };
+        }),
+        electricity_prices: tileVector(projectData.pricing, numPeriods),
+        charger_capacity_kw: localSettings.charger_capacity_kw,
+        grid_limit_kw: localSettings.grid_limit_kw,
+        use_next_day_readiness: localSettings.use_next_day_readiness,
+        pv_config: (scenario !== 'baseline') ? {
+          ...pvConfig,
+          latitude: projectData.meta.latitude,
+          longitude: projectData.meta.longitude,
+          reference_date: weatherDate
+        } : null,
+        bess_config: (scenario === 'bess' || scenario === 'pv_bess') ? {
+          ...bessConfig,
+          reference_date: weatherDate
+        } : null
+      };
+
       const result = await validateInputs(inputs);
       if (version !== validationVersionRef.current) return;
-      setValidationState({ key, result });
+      recordValidation(result, inputs);
       if (result.status === 'valid') {
         addLog('Plausibility check passed: Data is consistent.');
       } else {
         addLog(`Plausibility check found ${result.issues.length} issues.`);
       }
     } catch (err) {
+      if (version !== validationVersionRef.current) return;
+      const transportError = { message:err.message, http_status:err.response?.status ?? null, response:err.response?.data ?? null };
+      recordValidation({ status:'invalid', issues:[{ type:'ERROR', code:'VALIDATION_REQUEST_FAILED', category:'request',
+        message:`Validation could not be completed: ${err.message}`, details:transportError }] }, inputs, inputs ? 'transport' : 'frontend', transportError);
       addLog(`Validation Error: ${err.message}`);
     } finally {
       if (version === validationVersionRef.current) setIsValidating(false);
+    }
+  };
+
+  const handleExportDiagnostic = async (stage = 'validation') => {
+    const diagnostic = stage === 'optimization' ? optimizationFailure : validationResult && validationState?.diagnostic;
+    if (!diagnostic || isExportingDiagnostic) return;
+    setIsExportingDiagnostic(true);
+    setDiagnosticExportError('');
+    try {
+      const now = new Date();
+      const files = await diagnosticFiles(diagnostic, logs, getItem, now);
+      const url = URL.createObjectURL(diagnosticZip(files, now));
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `edopt-diagnostics-${stage}-${diagnostic.result.status}-${now.toISOString().replaceAll(':','-')}.zip`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      setDiagnosticExportError(`Diagnostic export failed: ${error.message}`);
+    } finally {
+      setIsExportingDiagnostic(false);
     }
   };
 
@@ -943,6 +1014,18 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     setValidationState(null);
     setIsValidating(false);
     setProjectData(prev => ({ ...prev, meta: { ...prev.meta, excluded_bus_ids: [] } }));
+  };
+
+  const handleExcludeDiagnosed = async requestedIds => {
+    if (isValidating) return;
+    const allowed = new Set(diagnosedRouteIds(optimizationFailure, activeBuses));
+    const ids = [...new Set(requestedIds.map(String))].filter(id => allowed.has(id));
+    const remaining = activeBuses.filter(bus => !ids.includes(String(bus.id)));
+    if (!ids.length || !remaining.length) return;
+    setValidationState(null);
+    setProjectData(prev => ({...prev,meta:{...prev.meta,excluded_bus_ids:[...new Set([...(prev.meta.excluded_bus_ids || []).map(String),...ids])]}}));
+    addLog(`Excluding diagnosed routes: ${ids.join(', ')}. Rechecking the remaining fleet.`);
+    await handleValidation(remaining);
   };
 
   const handleSave = async () => {
@@ -1004,29 +1087,27 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         <div className="animate-in">
           <ExcludedRoutesNotice ids={excludedBuses.map(bus => String(bus.id))} onRestore={handleRestoreExcluded} disabled={isValidating} />
           {projectData.charging?.opportunity?.enabled && projectData.meta.timetable_warnings?.some(w => w.type === 'OPPORTUNITY_MAPPING') && <details className="card mb-6">
-            <summary>Unvollständige Zusatzlade-Verbindungen werden nicht berücksichtigt</summary>
-            <p className="text-sm mt-2">Fehlende Distanzen, Ladeort- oder Knotenzuordnungen unter „Ladeorte &amp; Sperrzeiten“ ergänzen und mit „Continue to Settings“ neu verarbeiten.</p>
+            <summary>Incomplete additional charging connections are not used</summary>
+            <p className="text-sm mt-2">Complete missing distances, charging locations or node assignments under Input Data, then reprocess using Continue to Settings.</p>
             <ul className="text-xs mt-2">{projectData.meta.timetable_warnings.filter(w => w.type === 'OPPORTUNITY_MAPPING').map((w,i) => <li key={i}>{w.message}</li>)}</ul>
           </details>}
-          {optimizationError && <div className="card mb-6" role="alert" style={{ borderColor: 'var(--warning)' }}>
-            <h3 className="font-bold mb-2">Optimierung konnte keinen gültigen Ladeplan berechnen</h3>
-            <p className="text-sm" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{optimizationError}</p>
-            <p className="text-sm mt-3">Mit „Run Check“ kannst du die Energieanforderungen der verbleibenden Umläufe erneut prüfen. Ladefenster allein garantieren keine ausreichende Ladung.</p>
-          </div>}
+          {optimizationError && <OptimizationFailurePanel diagnostic={optimizationFailure} message={optimizationError}
+            onExport={() => handleExportDiagnostic('optimization')} isExporting={isExportingDiagnostic} exportError={diagnosticExportError}
+            onExclude={handleExcludeDiagnosed} excludableIds={activeBuses.length > 1 ? diagnosedRouteIds(optimizationFailure, activeBuses) : []} isExcluding={isValidating} activeBusCount={activeBuses.length} />}
           <div className="grid grid-cols-4 gap-6 mb-8">
             <div className="card stat-card shadow-sm">
                <div className="stat-info w-full">
                   <div className="flex items-center justify-between mb-1">
-                    <span className="stat-label">System Status</span>
+                    <span className="stat-label">Input Check</span>
                     <InfoTooltip 
-                      title="Engine Readiness" 
-                      text="Indicates if the optimization engine has successfully validated all mandatory system inputs (schedules, prices, and constraints) and is currently ready for mathematical solving." 
+                      title="Pre-solver Plausibility Check"
+                      text="Checks input consistency and individual energy bounds. A valid check allows solving but does not prove that shared connectors, power limits and switching restrictions permit a feasible fleet schedule."
                       align="right"
                     />
                   </div>
-                  <div className="flex items-center gap-2 text-primary font-bold text-base">
-                    <div className="w-2 h-2 rounded-full bg-primary animate-pulse"></div>
-                    READY
+                  <div className={`flex items-center gap-2 font-bold text-base ${validationResult?.status === 'invalid' ? 'text-error' : validationResult?.status === 'warning' ? 'text-warning' : validationResult?.status === 'valid' ? 'text-success' : 'text-muted'}`}>
+                    <div className={`w-2 h-2 rounded-full ${isValidating ? 'animate-pulse' : ''}`} style={{background:'currentColor'}}></div>
+                    {isValidating ? 'CHECKING' : validationResult ? validationResult.status.toUpperCase() : 'NOT CHECKED'}
                   </div>
                </div>
             </div>
@@ -1363,7 +1444,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                     <label className="form-label text-[10px] uppercase font-bold text-muted mb-0">Time Resolution (min)</label>
                     <InfoTooltip title="Optimization Step" text="Interval length for discrete steps." />
                   </div>
-                  <select 
+                  <CustomSelect
                     className={`form-input h-9 text-xs ${projectData.meta.data_source === 'uploaded' ? 'bg-muted/5 cursor-not-allowed opacity-60' : ''}`}
                     value={localSettings.time_resolution}
                     disabled={projectData.meta.data_source === 'uploaded'}
@@ -1372,7 +1453,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                     <option value={15}>15 Minutes</option>
                     <option value={30}>30 Minutes</option>
                     <option value={60}>60 Minutes</option>
-                  </select>
+                  </CustomSelect>
                 </div>
 
                 <div className="form-group mb-0">
@@ -1522,7 +1603,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                       <label className="form-label text-[10px] uppercase font-bold text-muted mb-0">PV Profile Mode</label>
                       <InfoTooltip title="Generation Model" text="Diurnal curve or irradiation data profile." />
                     </div>
-                    <select 
+                    <CustomSelect
                       className="form-input h-9 text-xs"
                       value={pvConfig.profile_mode}
                       onChange={(e) => setPvConfig(prev => ({ ...prev, profile_mode: e.target.value }))}
@@ -1530,7 +1611,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                       <option value="bell_curve">Standard Bell-Curve (Auto)</option>
                       <option value="open_meteo">Open-Meteo Calculation</option>
                       <option disabled>Custom Upload (CSV)</option>
-                    </select>
+                    </CustomSelect>
                   </div>
 
                   <div className="form-group mb-0">
@@ -1798,7 +1879,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                           <label className="form-label text-[10px] uppercase font-bold text-muted mb-0">Input Source</label>
                           <InfoTooltip title="Data Origin" text="Determine if temperatures are fetched dynamically from weather APIs, manual profiles, or a static constant value." />
                         </div>
-                        <select 
+                        <CustomSelect
                           className="form-input h-9 text-xs"
                           value={bessConfig.temperature_source}
                           onChange={(e) => setBessConfig(prev => ({ ...prev, temperature_source: e.target.value }))}
@@ -1806,7 +1887,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                           <option value="open_meteo">Open-Meteo AI</option>
                           <option value="manual">Manual Override</option>
                           <option value="constant">Static Constant</option>
-                        </select>
+                        </CustomSelect>
                       </div>
                       
                       <div />
@@ -1890,7 +1971,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                     <label className="form-label text-[10px] uppercase font-bold text-muted mb-0">Chunk Horizon</label>
                     <InfoTooltip title="MPC Window" text="Resolution of individual optimization chunks. Larger windows allow better look-ahead but increase solve time." />
                   </div>
-                  <select
+                  <CustomSelect
                     value={longTermConfig.chunkSizeHours}
                     onChange={(e) => setLongTermConfig({...longTermConfig, chunkSizeHours: parseInt(e.target.value)})}
                     className="form-input h-9 text-xs"
@@ -1898,7 +1979,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                     <option value={24}>24 Hours</option>
                     <option value={48}>48 Hours</option>
                     <option value={72}>72 Hours</option>
-                  </select>
+                  </CustomSelect>
                 </div>
               </div>
             )}
@@ -1928,32 +2009,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           </div>
 
           <div className="card shadow-lg p-6 flex flex-col items-center">
-            {validationResult && (
-              <div className={`w-full p-4 rounded-xl border mb-6 ${
-                validationResult.status === 'valid' ? 'bg-success/5 border-success/20' : 
-                'bg-warning/5 border-warning/20 text-warning'
-              }`}>
-                <div className="flex items-center gap-2 mb-2 font-bold text-sm">
-                  {validationResult.status === 'valid' ? <CheckCircle size={18} className="text-success" /> : <AlertCircle size={18} />}
-                  System Status: {validationResult.status.toUpperCase()}
-                </div>
-                {validationResult.issues.length > 0 && (
-                  <ul className="text-xs space-y-1">
-                    {validationResult.issues.map((issue, i) => (
-                      <li key={i}>• {issue.message}</li>
-                    ))}
-                  </ul>
-                )}
-                {excludableIds.length > 0 && <div className="mt-4">
-                  <p className="text-sm mb-3">Für {excludableIds.length} {excludableIds.length === 1 ? 'Umlauf' : 'Umläufe'} wurden fehlende Ladefenster oder nicht erfüllbare Energieanforderungen erkannt. Du kannst {excludableIds.length === 1 ? 'ihn' : 'sie'} ausschließen und mit den übrigen Umläufen fortfahren.</p>
-                  <button className="btn btn-outline" onClick={handleExcludeUnavailable} disabled={isValidating || excludableIds.length >= activeBuses.length}>
-                    Ignore and continue without these routes ({excludableIds.length})
-                  </button>
-                  {excludableIds.length >= activeBuses.length && <p className="text-sm mt-2">Es muss mindestens ein Umlauf übrig bleiben. Bitte zuerst Ladeorte oder Fahrplandaten korrigieren.</p>}
-                </div>}
-              </div>
-            )}
-            
+            {validationResult && <ValidationStatusPanel
+              result={validationResult} excludableIds={excludableIds} activeBusCount={activeBuses.length}
+              onExclude={handleExcludeUnavailable} onExport={() => handleExportDiagnostic('validation')}
+              isExporting={isExportingDiagnostic} isValidating={isValidating} exportError={diagnosticExportError}
+            />}
+
             <div className="flex items-center gap-4">
               <button 
                 className={`btn btn-outline px-6 h-11 ${isValidating ? 'opacity-50' : ''}`}

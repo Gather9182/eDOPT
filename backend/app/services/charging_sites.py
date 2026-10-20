@@ -20,7 +20,7 @@ def slot_is_blocked(site, minute, step):
 
 def validate_sites(inputs):
     if any(bus.opportunity_visits for bus in inputs.buses) and not inputs.charging_sites:
-        raise ValueError('Zusätzliche Ladefahrten benötigen konfigurierte Ladeorte.')
+        raise ValueError('Additional charging trips require configured charging locations.')
     if inputs.use_charging_sites and not inputs.charging_sites:
         raise ValueError('Add at least one charging location or disable separate charging locations.')
     if not inputs.charging_sites:
@@ -38,13 +38,13 @@ def validate_sites(inputs):
     if inputs.scenario != 'baseline' and inputs.energy_site_id not in ids:
         raise ValueError('Select the charging site hosting PV and BESS.')
     if not inputs.buses or len({b.id for b in inputs.buses}) != len(inputs.buses):
-        raise ValueError('Provide buses with unique Umlauf IDs for location-based charging.')
+        raise ValueError('Provide buses with unique route IDs for location-based charging.')
     for bus in inputs.buses:
         for visit in bus.opportunity_visits:
             if visit.site_id not in ids or visit.origin_site_id not in (None, *ids) or visit.return_site_id not in (None, *ids):
-                raise ValueError(f'Bus {bus.id}: unbekannter Ladeort im Mapping.')
+                raise ValueError(f'Bus {bus.id}: unknown charging location in the mapping.')
             if visit.pause_end_min <= visit.pause_start_min or visit.pause_end_min-visit.pause_start_min > bus.opportunity_period_minutes:
-                raise ValueError(f'Bus {bus.id}: ungültige Pause für Zusatzladefahrt.')
+                raise ValueError(f'Bus {bus.id}: invalid layover for an additional charging trip.')
         if len(bus.availability) != n or len(bus.trip_energy_profile_kwh) != n:
             raise ValueError(f'Bus {bus.id}: availability and trip energy lengths must match the price profile.')
         if bus.site_nodes and bus.site_nodes != {s.id: s.nodes for s in inputs.charging_sites}:

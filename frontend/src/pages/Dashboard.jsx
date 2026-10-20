@@ -75,7 +75,7 @@ const Dashboard = ({ onStartOptimization, projectData, setActiveTab }) => {
       </div>
 
       <div className="grid grid-cols-2 gap-6">
-        <div className="card h-fit transition-all hover:shadow-md">
+        <div className="card h-fit">
           <div className="flex justify-between items-center mb-4">
             <h3 className="card-title m-0"><TrendingUp size={18} className="text-primary" /> Workflow Progress</h3>
           </div>

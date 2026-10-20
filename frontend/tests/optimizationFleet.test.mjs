@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { optimizationFleet, excludableBusIds, fleetRunMetadata } from '../src/utils/optimizationFleet.js';
+import { optimizationFleet, excludableBusIds, diagnosedRouteIds, fleetRunMetadata } from '../src/utils/optimizationFleet.js';
 
 test('only explicitly identified route energy or availability issues can exclude known routes', () => {
   const buses = [{id:'Bus: A'}, {id:2}, {id:'Other'}];
@@ -38,4 +38,30 @@ test('an empty included fleet stays empty rather than falling back to imported b
   const project = {buses:[{id:'A'}],meta:{excluded_bus_ids:['A']}};
   assert.deepEqual(optimizationFleet(project).included,[]);
   assert.equal(optimizationFleet(project).excluded.length,1);
+});
+
+test('disabled optional trips never reach the solver, while scheduled charging and original import survive', () => {
+  const bus = {id:'B',availability:[1],site_availability:{HOME:[1]},opportunity_visits:[{id:'V'}]};
+  const project = {buses:[bus],charging:{enabled:true,opportunity:{enabled:false}}};
+  const active = optimizationFleet(project).included[0];
+  assert.deepEqual(active.opportunity_visits,[]);
+  assert.deepEqual(active.site_availability,{HOME:[1]});
+  assert.deepEqual(active.availability,[1]);
+  assert.equal(bus.opportunity_visits.length,1);
+  project.charging.opportunity.enabled = true;
+  assert.equal(optimizationFleet(project).included[0],bus);
+  project.charging.enabled = false;
+  assert.deepEqual(optimizationFleet(project).included[0].opportunity_visits,[]);
+});
+
+test('diagnosed exclusion requires an exact known classification, never just a deficit or timeout', () => {
+  const buses = ['bad','conflict','solo','timeout'].map(id => ({id}));
+  const diagnostic = {result:{diagnostics:{energy_relaxation:{findings:[{bus_id:'solo'}]},route_feasibility:{routes:[
+    {bus_id:'bad',status:'individually_infeasible'},{bus_id:'conflict',status:'affected_by_fleet_conflict'},
+    {bus_id:'solo',status:'feasible_in_isolation'},{bus_id:'timeout',status:'not_determined'},
+    {bus_id:'unknown',status:'individually_infeasible'},
+  ]}}}};
+  assert.deepEqual(diagnosedRouteIds(diagnostic,buses),['bad','conflict']);
+  assert.deepEqual(diagnosedRouteIds(diagnostic,buses,true),['bad']);
+  assert.deepEqual(diagnosedRouteIds(null,buses),[]);
 });

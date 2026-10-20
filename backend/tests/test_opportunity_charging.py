@@ -154,18 +154,77 @@ class OptionalVisitTests(unittest.TestCase):
             run_offline(run_milp_solver(source))
 
 
-def mapped_workbook():
+def mapped_workbook(mapping_rows=None, mapping_columns=None):
     defaults=dict(Umlauf='U',Betriebstage='Mo-Do',Planungsbedingung='',Typ='L',Meter=1000,Fahrzeugtyp='EV')
     rows=[{**defaults,'von':'X','nach':'STOP','Startzeit':'08:00','Endzeit':'09:00','von (Beschreibung)':'X','nach (Beschreibung)':'Pause'},
           {**defaults,'von':'STOP','nach':'X','Startzeit':'11:00','Endzeit':'12:00','von (Beschreibung)':'Pause','nach (Beschreibung)':'X'}]
     stream=BytesIO()
     with pd.ExcelWriter(stream) as writer:
         pd.DataFrame(rows).to_excel(writer,sheet_name='Mo-Do Schule',index=False)
-        pd.DataFrame([['Pause','Target','15 min','10 min']],columns=['Haltestelle','Ladestandort','Hinweg','Rückweg']).to_excel(writer,sheet_name='Mapping Lademöglichkeiten',index=False)
+        pd.DataFrame(mapping_rows if mapping_rows is not None else [['Pause','Target','15 min','10 min']],
+                     columns=mapping_columns or ['Haltestelle','Ladestandort','Hinweg','Rückweg']).to_excel(writer,sheet_name='Mapping Lademöglichkeiten',index=False)
     return stream.getvalue()
 
 
 class MappingImportTests(unittest.TestCase):
+    def test_disabled_mapping_import_has_no_optional_visits(self):
+        content = mapped_workbook([['STOP', 'Pause', 'Target', 15, 4]],
+            ['Haltestellen Code', 'Haltestelle', 'Ladestandort', 'Hinweg/Rückweg [min]', 'einfache Strecke [km]'])
+        mapping = scan_umlauf_excel(content)['charging_mappings'][0]
+        mapping['site_id'] = 'D'
+        settings = dict(BETRIEBSTAGE=[], CHARGING_SITES=[site()],
+            OPPORTUNITY_CHARGING=dict(enabled=True, mappings=[mapping]))
+        enabled = process_umlauf_excel(content, settings)['bus_inputs'][0]
+        self.assertTrue(enabled.get('opportunity_visits'))
+        settings['OPPORTUNITY_CHARGING']['enabled'] = False
+        disabled = process_umlauf_excel(content, settings)['bus_inputs'][0]
+        self.assertFalse(disabled.get('opportunity_visits'))
+        self.assertEqual(enabled['site_availability'], disabled['site_availability'])
+        self.assertEqual(enabled['trip_energy_profile_kwh'], disabled['trip_energy_profile_kwh'])
+
+    def test_code_mapping_with_shared_per_direction_time_and_distance(self):
+        content = mapped_workbook([['STOP', 'Renamed stop', 'Target', 15, '10,5']],
+                                  ['Haltestellen Code', 'Haltestelle', 'Ladestandort', 'Hinweg/Rückweg [min]', 'einfache Strecke [km]'])
+        mapping = scan_umlauf_excel(content)['charging_mappings'][0]
+        self.assertEqual(mapping['nodes'], ['STOP'])
+        self.assertEqual(mapping['source_node_code'], 'STOP')
+        self.assertEqual(mapping['outbound_minutes'], 15)
+        self.assertEqual(mapping['return_minutes'], 15)
+        self.assertEqual(mapping['outbound_km'], 10.5)
+        self.assertEqual(mapping['return_km'], 10.5)
+        mapping['site_id'] = 'D'
+        result = process_umlauf_excel(content, dict(BETRIEBSTAGE=[], CHARGING_SITES=[site()],
+            DEFAULT_CONSUMPTION_WH_PER_M=1.5, OPPORTUNITY_CHARGING=dict(enabled=True, mappings=[mapping])))
+        visit = result['bus_inputs'][0]['opportunity_visits'][0]
+        self.assertEqual(visit['outbound_energy_kwh'] + visit['return_energy_kwh'], 31.5)
+        self.assertEqual(visit['outbound_minutes'] + visit['return_minutes'], 30)
+
+    def test_explicit_code_never_falls_back_to_a_matching_description(self):
+        content = mapped_workbook([['UNKNOWN', 'Pause', 'Target', 15, 10]],
+                                  ['Haltestellen Code', 'Haltestelle', 'Ladestandort', 'Hinweg/Rückweg [min]', 'einfache Strecke [km]'])
+        mapping = scan_umlauf_excel(content)['charging_mappings'][0]
+        self.assertEqual(mapping['nodes'], [])
+        self.assertIn('UNKNOWN', mapping['node_issue'])
+        mapping['site_id'] = 'D'
+        result = process_umlauf_excel(content, dict(BETRIEBSTAGE=[], CHARGING_SITES=[site()],
+            OPPORTUNITY_CHARGING=dict(enabled=True, mappings=[mapping])))
+        self.assertFalse(result['bus_inputs'][0].get('opportunity_visits'))
+        self.assertTrue(any('UNKNOWN' in warning['message'] for warning in result['validation_results']['warnings']))
+
+    def test_separate_legs_override_shared_values_and_zero_is_preserved(self):
+        content = mapped_workbook([['STOP', 'Target', 15, 0, 10, 5, 0, 3]],
+                                  ['Haltestellen Code', 'Ladestandort', 'Hinweg/Rückweg [min]', 'Hinweg [min]', 'Rückweg [min]',
+                                   'einfache Strecke [km]', 'Hinweg [km]', 'Rückweg [km]'])
+        mapping = scan_umlauf_excel(content)['charging_mappings'][0]
+        self.assertEqual((mapping['outbound_minutes'], mapping['return_minutes']), (0, 10))
+        self.assertEqual((mapping['outbound_km'], mapping['return_km']), (0, 3))
+
+    def test_invalid_distance_is_reported_with_its_excel_row(self):
+        content = mapped_workbook([['STOP', 'Target', 15, -3]],
+                                  ['Haltestellen Code', 'Ladestandort', 'Hinweg/Rückweg [min]', 'einfache Strecke [km]'])
+        with self.assertRaisesRegex(ValueError, 'Mapping row 2: Invalid distance'):
+            scan_umlauf_excel(content)
+
     def test_mapping_scan_and_missing_distances_are_explicit(self):
         content=mapped_workbook()
         mappings=scan_umlauf_excel(content)['charging_mappings']
@@ -175,7 +234,7 @@ class MappingImportTests(unittest.TestCase):
         settings=dict(BETRIEBSTAGE=[],CHARGING_SITES=[site()],OPPORTUNITY_CHARGING=dict(enabled=True,mappings=mappings))
         result=process_umlauf_excel(content,settings)
         self.assertFalse(result['bus_inputs'][0].get('opportunity_visits'))
-        self.assertTrue(any('Distanz' in w['message'] for w in result['validation_results']['warnings']))
+        self.assertTrue(any('distance' in w['message'] for w in result['validation_results']['warnings']))
         mappings[0].update(outbound_km=4,return_km=3)
         result=process_umlauf_excel(content,settings)
         option=result['bus_inputs'][0]['opportunity_visits'][0]

@@ -438,13 +438,11 @@ const Export = ({ projectData }) => {
         }
 
         .export-card {
-          transition: all 0.3s ease;
+          transition: border-color 0.3s ease, background-color 0.3s ease;
           min-height: 190px;
         }
 
         .export-card:hover {
-          transform: translateY(-2px);
-          box-shadow: var(--shadow-md);
           border-color: var(--primary-soft);
         }
         

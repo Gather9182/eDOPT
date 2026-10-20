@@ -1,3 +1,4 @@
+import CustomSelect from './CustomSelect';
 import React from 'react';
 import { addSelectedDepotSites } from '../utils/charging';
 
@@ -31,26 +32,26 @@ export default function ChargingSitesEditor({ projectData, setProjectData, nodes
           <button className="btn btn-outline" onClick={() => update({ sites: sites.filter(s => s.id !== site.id), energy_site_id: config.energy_site_id === site.id ? '' : config.energy_site_id })}>Entfernen</button>
         </div>
         <label className="block mb-3">Fahrplanknoten (Mehrfachauswahl mit Strg)
-          <select aria-label={`Knoten ${site.name}`} multiple className="form-input w-full" style={{ minHeight: 100 }} value={site.nodes} onChange={e => edit(site.id, { nodes: Array.from(e.target.selectedOptions, o => o.value) })}>
+          <CustomSelect aria-label={`Knoten ${site.name}`} multiple className="form-input w-full" style={{ minHeight: 100 }} value={site.nodes} onChange={e => edit(site.id, { nodes: Array.from(e.target.selectedOptions, o => o.value) })}>
             {[...new Set([...nodes, ...site.nodes])].sort().map(node => <option key={node} value={node} disabled={sites.some(s => s.id !== site.id && s.nodes.includes(node))}>{node}{descriptions[node] ? ` — ${descriptions[node]}` : ''}</option>)}
-          </select>
+          </CustomSelect>
         </label>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
           {numberFields.map(([key, label]) => <label key={key}>{label}<input aria-label={`${label} ${site.name}`} className="form-input w-full" type="number" min="0" step={key === 'num_chargers' ? '1' : '0.1'} value={site[key]} onChange={e => edit(site.id, { [key]: Number(e.target.value) })} /></label>)}
         </div>
         <p className="text-sm text-muted mt-3 mb-2">Während einer Umstecksperre bleiben abgestellte Busse angeschlossen, auch bei 0 kW. Fahrplanmäßige Abfahrten bleiben möglich. Gleiche Start- und Endzeit sperrt den ganzen Tag.</p>
-        {(site.no_switch_windows || []).map((window, i) => <div key={i} className="flex items-center gap-2 mb-2">
-          <label>Von <input aria-label={`Sperre von ${site.name} ${i+1}`} type="time" value={window.start} onChange={e => edit(site.id, { no_switch_windows: site.no_switch_windows.map((w, j) => j === i ? { ...w, start: e.target.value } : w) })} /></label>
-          <label>Bis <input aria-label={`Sperre bis ${site.name} ${i+1}`} type="time" value={window.end} onChange={e => edit(site.id, { no_switch_windows: site.no_switch_windows.map((w, j) => j === i ? { ...w, end: e.target.value } : w) })} /></label>
+        {(site.no_switch_windows || []).map((window, i) => <div key={i} className="time-window-row mb-2">
+          <label>Von <input className="form-input time-window-input" aria-label={`Sperre von ${site.name} ${i+1}`} type="time" value={window.start} onChange={e => edit(site.id, { no_switch_windows: site.no_switch_windows.map((w, j) => j === i ? { ...w, start: e.target.value } : w) })} /></label>
+          <label>Bis <input className="form-input time-window-input" aria-label={`Sperre bis ${site.name} ${i+1}`} type="time" value={window.end} onChange={e => edit(site.id, { no_switch_windows: site.no_switch_windows.map((w, j) => j === i ? { ...w, end: e.target.value } : w) })} /></label>
           <button className="btn btn-outline" onClick={() => edit(site.id, { no_switch_windows: site.no_switch_windows.filter((_, j) => j !== i) })}>Löschen</button>
         </div>)}
         <button className="btn btn-outline mb-3" onClick={() => edit(site.id, { no_switch_windows: [...(site.no_switch_windows || []), { start: '22:00', end: '05:00' }] })}>Sperrzeit hinzufügen</button>
         <label className="flex items-center gap-2"><input type="checkbox" checked={site.allow_connect_on_arrival ?? true} onChange={e => edit(site.id, { allow_connect_on_arrival: e.target.checked })} /> Bei Ankunft während der Sperre einmalig an freien Ladepunkt anschließen</label>
       </div>)}
-      <label>Standort für PV und stationären Speicher<select className="form-input w-full" value={config.energy_site_id || ''} onChange={e => update({ energy_site_id: e.target.value })}>
+      <label>Standort für PV und stationären Speicher<CustomSelect className="form-input w-full" value={config.energy_site_id || ''} onChange={e => update({ energy_site_id: e.target.value })}>
         <option value="">Bitte für PV/BESS-Szenarien auswählen</option>
         {sites.map(site => <option key={site.id} value={site.id}>{site.name}</option>)}
-      </select></label>
+      </CustomSelect></label>
       <p className="text-sm text-muted mt-2">PV und Speicher versorgen ausschließlich den ausgewählten Ort.</p>
     </>}
   </div>;

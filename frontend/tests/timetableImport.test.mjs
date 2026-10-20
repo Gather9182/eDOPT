@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { timetableSettings, timetableFingerprint, processTimetableDraft, projectWithTimetable, saveTimetableSource, loadTimetableSource } from '../src/utils/timetableImport.js';
+import { importedVehicleTypes, timetableSettings, timetableFingerprint, processTimetableDraft, projectWithTimetable, saveTimetableSource, loadTimetableSource } from '../src/utils/timetableImport.js';
 
 const oldBus = {id:'OLD',availability:[1,0],trip_energy_profile_kwh:[0,10],max_battery_capacity_kwh:100};
 function draft() {
@@ -13,6 +13,24 @@ function draft() {
 }
 const result = () => ({bus_inputs:[{id:'NEW',availability:[1,0],trip_energy_profile_kwh:[0,25],site_availability:{D:[1,0]},
   site_presence:{D:[1,0]},site_arrivals:{D:[0,0]},site_nodes:{D:['D_A','D_E']},max_battery_capacity_kwh:450}],charging_sites:[{id:'D',nodes:['D_A','D_E']}]});
+
+test('group selection changes source labels and is preserved through continue', async () => {
+  const context = draft();
+  const original = timetableFingerprint(timetableSettings(context), context.roundWindows);
+  assert.equal(timetableSettings(context).USE_VEHICLE_TYPE_GROUP, false);
+  context.options.useVehicleTypeGroup = true;
+  const bus = { vehicle_types:['RB12'], vehicle_type_groups:['GB/LB', 'GB'] };
+  assert.deepEqual(importedVehicleTypes(bus, context.options), ['GB']);
+  assert.deepEqual(importedVehicleTypes(bus, {...context.options, useFirstVehicleType:false}), ['GB/LB', 'GB']);
+  assert.deepEqual(importedVehicleTypes(bus, {...context.options, useVehicleTypeGroup:false}), ['RB12']);
+  assert.deepEqual(importedVehicleTypes({vehicle_types:['RB12']}, context.options), []);
+  assert.notEqual(timetableFingerprint(timetableSettings(context), context.roundWindows), original);
+  const data = await processTimetableDraft(context, async (file, round, settings) => {
+    assert.equal(settings.USE_VEHICLE_TYPE_GROUP, true);
+    return result();
+  });
+  assert.equal(projectWithTimetable(context.projectData, data, context).meta.import_settings.useVehicleTypeGroup, true);
+});
 
 test('continue prepares current configuration and replaces old project buses with the fresh response',async () => {
   const context=draft();
@@ -48,14 +66,14 @@ test('failed processing leaves project data intact',async () => {
 test('old buses with no location profiles cannot silently continue when locations are enabled',async () => {
   const context=draft();context.file=null;
   context.initialFingerprint=timetableFingerprint(timetableSettings(context),context.roundWindows);
-  await assert.rejects(processTimetableDraft(context,async()=>assert.fail('No file to process')),/ursprüngliche Excel-Datei/);
+  await assert.rejects(processTimetableDraft(context,async()=>assert.fail('No file to process')),/original Excel file/);
 });
 
 test('changes requiring reprocessing do not fall back to old buses if the source is missing',async () => {
   const context=draft();context.file=null;
   context.initialFingerprint=timetableFingerprint(timetableSettings(context),context.roundWindows);
   context.options={...context.options,useFirstVehicleType:false};
-  await assert.rejects(processTimetableDraft(context,async()=>assert.fail('No file to process')),/erneut hochladen/);
+  await assert.rejects(processTimetableDraft(context,async()=>assert.fail('No file to process')),/Upload it again/);
 });
 
 test('unchanged existing legacy projects can continue without uploading again',async () => {
@@ -67,8 +85,8 @@ test('unchanged existing legacy projects can continue without uploading again',a
 
 test('invalid or stale location responses are rejected before being applied',async () => {
   const context=draft(), stale=result();stale.bus_inputs[0].site_nodes.D=['other'];
-  await assert.rejects(processTimetableDraft(context,async()=>stale),/Ladeorten/);
-  await assert.rejects(processTimetableDraft(context,async()=>({bus_inputs:[]})),/Keine Umläufe/);
+  await assert.rejects(processTimetableDraft(context,async()=>stale),/charging locations/);
+  await assert.rejects(processTimetableDraft(context,async()=>({bus_inputs:[]})),/No routes found/);
 });
 
 test('saved source bytes survive JSON storage and reopening, including binary XLSX data',async () => {
@@ -79,10 +97,10 @@ test('saved source bytes survive JSON storage and reopening, including binary XL
   assert.equal(restored.name,file.name);
   assert.equal(restored.lastModified,123456);
   assert.deepEqual(new Uint8Array(await restored.arrayBuffer()),new Uint8Array(await file.arrayBuffer()));
-  await assert.rejects(loadTimetableSource('missing',async()=>null),/nicht verfügbar/);
+  await assert.rejects(loadTimetableSource('missing',async()=>null),/unavailable/);
 });
 
 test('invalid SoC settings fail before the backend request',async () => {
   const context=draft();context.initialSoc=101;
-  await assert.rejects(processTimetableDraft(context,async()=>assert.fail('Must validate before processing')),/0 und 100/);
+  await assert.rejects(processTimetableDraft(context,async()=>assert.fail('Must validate before processing')),/0 and 100/);
 });

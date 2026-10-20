@@ -1,4 +1,6 @@
+import CustomSelect from './CustomSelect';
 import React from 'react';
+import { importedVehicleTypes } from '../utils/timetableImport';
 
 export default function TimetableImportOptions({ scan, options, onChange, onSheetChange, disabled, vehicleTypes, initialSoc, setInitialSoc, minFinalSoc, setMinFinalSoc }) {
   if (!scan) return null;
@@ -8,10 +10,10 @@ export default function TimetableImportOptions({ scan, options, onChange, onShee
   return <div className="card p-5 mb-4">
     <h3 className="font-bold mb-3">Importeinstellungen</h3>
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16 }}>
-      <label>Tabellenblatt<select aria-label="Tabellenblatt" className="form-input w-full" disabled={disabled} value={options.sheet} onChange={e => onSheetChange(e.target.value)}>{scan.sheet_names.map(name => <option key={name}>{name}</option>)}</select></label>
-      <label>Entfernungsregel<select aria-label="Entfernungsregel" className="form-input w-full" value={options.distanceUnit} onChange={e => update({ distanceUnit: e.target.value })}>
+      <label>Tabellenblatt<CustomSelect aria-label="Tabellenblatt" className="form-input w-full" disabled={disabled} value={options.sheet} onChange={e => onSheetChange(e.target.value)}>{scan.sheet_names.map(name => <option key={name}>{name}</option>)}</CustomSelect></label>
+      <label>Entfernungsregel<CustomSelect aria-label="Entfernungsregel" className="form-input w-full" value={options.distanceUnit} onChange={e => update({ distanceUnit: e.target.value })}>
         <option value="legacy">Bisherige Erkennung</option><option value="m">Alle Werte in Metern</option><option value="km">Alle Werte in Kilometern</option><option value="mixed">Gemischter Export mit Größengrenze</option>
-      </select></label>
+      </CustomSelect></label>
       {options.distanceUnit === 'mixed' && <label>Ganzzahlige Werte unter dieser Grenze sind km<input aria-label="Kilometergrenze" className="form-input w-full" type="number" min="0.001" step="1" value={options.mixedThreshold} onChange={e => update({ mixedThreshold: Number(e.target.value) })} /></label>}
     </div>
     <div className="flex gap-4 mt-3">
@@ -22,10 +24,13 @@ export default function TimetableImportOptions({ scan, options, onChange, onShee
     <div className="mt-3"><label className="flex items-center gap-2"><input type="checkbox" checked={options.days.length === 0} onChange={e => update({ days: e.target.checked ? [] : [...scan.operating_days] })} /> Alle Zeilen des ausgewählten Blatts (bereits nach Betriebstag vorbereitet)</label>
       <div className="flex gap-4 mt-2">{scan.operating_days.map(day => <label key={day} className="flex items-center gap-2"><input type="checkbox" checked={options.days.includes(day)} onChange={e => update({ days: e.target.checked ? [...options.days, day] : options.days.filter(d => d !== day) })} />{day}</label>)}</div>
     </div>
+    <label className="flex items-center gap-2 mt-3"><input type="checkbox" disabled={disabled} checked={Boolean(options.useVehicleTypeGroup)} onChange={e => update({ useVehicleTypeGroup: e.target.checked })} /> Spalte „Fahrzeugtypgruppe“ statt „Fahrzeugtyp“ verwenden</label>
+    <p className="text-sm text-muted mt-1">Gilt für alle Umläufe und kann jederzeit umgeschaltet werden. Verbrauch und Batterie werden unter Constraints für die gewählten Gruppen eingestellt. Eine manuelle Auswahl je Umlauf hat Vorrang.</p>
+    {options.useVehicleTypeGroup && scan.vehicle_type_groups?.length === 0 && <p role="status" className="text-sm text-warning mt-1">No vehicle type groups were found in the selected sheet. Fill in the column or assign vehicle types manually per route.</p>}
     <label className="flex items-center gap-2 mt-3"><input type="checkbox" checked={Boolean(options.useFirstVehicleType)} onChange={e => update({ useFirstVehicleType: e.target.checked })} /> Bei Fahrzeugtyp-Angaben mit Schrägstrich nur den ersten Teil verwenden</label>
-    <p className="text-sm text-muted mt-1">Beispiel: NGB/RB12 wird zu NGB. Verbrauch und Batterie werden anhand dieses Typs bestimmt. Eine manuelle Auswahl je Umlauf hat Vorrang.</p>
+    <p className="text-sm text-muted mt-1">Beispiel: NGB/RB12 wird zu NGB. Gilt auch für Fahrzeugtypgruppen, wenn diese gewählt sind. Verbrauch und Batterie werden anhand dieser Bezeichnung bestimmt. Eine manuelle Auswahl je Umlauf hat Vorrang.</p>
     <details className="mt-3"><summary>Fahrzeugtyp je Umlauf festlegen</summary><p className="text-sm text-muted mb-2">Eine explizite Auswahl gilt für alle Fahrten des Umlaufs. Verbrauch und Batterie werden unter Constraints eingestellt.</p>
-      <div style={{ maxHeight: 280, overflowY: 'auto' }}>{scan.umlaeufe.map(bus => <label key={bus.id} className="flex gap-3 items-center mb-2"><span style={{ minWidth: 110 }}>{bus.id}</span><select aria-label={`Fahrzeugtyp ${bus.id}`} className="form-input" value={options.vehicleOverrides[bus.id] || ''} onChange={e => update({ vehicleOverrides: { ...options.vehicleOverrides, [bus.id]: e.target.value } })}><option value="">Aus Datei: {(options.useFirstVehicleType ? [...new Set(bus.vehicle_types.map(firstPart))] : bus.vehicle_types).join(', ')}</option>{choices.map(type => <option key={type}>{type}</option>)}</select></label>)}</div>
+      <div style={{ maxHeight: 280, overflowY: 'auto' }}>{scan.umlaeufe.map(bus => <label key={bus.id} className="flex gap-3 items-center mb-2"><span style={{ minWidth: 110 }}>{bus.id}</span><CustomSelect aria-label={`Fahrzeugtyp ${bus.id}`} className="form-input" value={options.vehicleOverrides[bus.id] || ''} onChange={e => update({ vehicleOverrides: { ...options.vehicleOverrides, [bus.id]: e.target.value } })}><option value="">Aus {options.useVehicleTypeGroup ? 'Fahrzeugtypgruppe' : 'Datei'}: {importedVehicleTypes(bus, options).join(', ') || 'Keine Angabe'}</option>{[...new Set([...choices, options.vehicleOverrides[bus.id]].filter(Boolean))].map(type => <option key={type}>{type}</option>)}</CustomSelect></label>)}</div>
     </details>
   </div>;
 }

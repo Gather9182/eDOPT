@@ -8,7 +8,7 @@ def visit_grids(bus, inputs):
     start, end = inputs.horizon_start_minute, inputs.horizon_start_minute+n*step
     for visit in bus.opportunity_visits:
         if visit.pause_end_min <= visit.pause_start_min:
-            raise ValueError(f'{visit.id}: Ende der Pause muss nach ihrem Beginn liegen.')
+            raise ValueError(f'{visit.id}: The layover must end after it starts.')
         period = bus.opportunity_period_minutes
         for day in range(math.floor((start-visit.pause_end_min)/period), math.ceil((end-visit.pause_start_min)/period)):
             a = math.ceil((visit.pause_start_min+day*period+visit.buffer_minutes-start)/step)
@@ -61,7 +61,7 @@ def add_opportunity_variables(prob, inputs):
         groups = {}
         for vi, (visit, day, a, b, out, back, minimum) in enumerate(visit_grids(bus, inputs)):
             if visit.site_id not in sites:
-                raise ValueError(f'{visit.id}: unbekannter Ladestandort.')
+                raise ValueError(f'{visit.id}: unknown charging location.')
             x = pulp.LpVariable(f'visit_{bi}_{vi}', cat='Binary')
             groups.setdefault((visit.gap_id, day), []).append(x)
             def travel_allowed(t, duration):

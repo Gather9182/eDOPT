@@ -31,6 +31,7 @@ DEFAULT_SETTINGS = {
     "CHARGING_SITES": [],
     "UMLAUF_VEHICLE_TYPES": {},
     "USE_FIRST_VEHICLE_TYPE": False,
+    "USE_VEHICLE_TYPE_GROUP": False,
     "OPPORTUNITY_CHARGING": {},
 }
 
@@ -103,9 +104,12 @@ def normalize_vehicle_type(v):
         return ""
     return str(v).strip()
 
-def get_vehicle_type(row):
+def get_vehicle_type(row, use_group=False):
     vt = normalize_vehicle_type(row.get("Fahrzeugtyp", ""))
     vt_group = normalize_vehicle_type(row.get("Fahrzeugtypgruppe", ""))
+
+    if use_group:
+        return vt_group
 
     selected = vt if vt else vt_group
 
@@ -165,10 +169,18 @@ def filter_planungsbedingung(df: pd.DataFrame, settings: Dict[str, Any]) -> pd.D
     return df[cond_bt & cond_pb].copy()
 
 
+def timetable_rows(frame):
+    # Export footers can contain only a total in Meter. Never treat partially
+    # populated trips as footers: every other source field must be empty.
+    payload = frame.drop(columns=['Meter'], errors='ignore').replace(r'^\s*$', np.nan, regex=True)
+    keep = payload.notna().any(axis=1)
+    return frame.loc[keep].copy(), [int(i)+2 for i in frame.index[~keep]]
+
+
 def scan_umlauf_excel(content, sheet_name=None):
     xl = pd.ExcelFile(BytesIO(content))
     sheet_name = sheet_name or ('Tabelle1' if 'Tabelle1' in xl.sheet_names else xl.sheet_names[0])
-    df = xl.parse(sheet_name)
+    df, ignored_rows = timetable_rows(xl.parse(sheet_name))
     required = {'Umlauf', 'Typ', 'von', 'nach', 'Startzeit', 'Endzeit'}
     if not required.issubset(df.columns):
         raise ValueError(f'{sheet_name} is not a timetable. Select a sheet containing Umlauf, Typ, von, nach, Startzeit and Endzeit.')
@@ -185,6 +197,7 @@ def scan_umlauf_excel(content, sheet_name=None):
     days = sorted(df['Betriebstage'].dropna().astype(str).unique()) if 'Betriebstage' in df else []
     return {
         'sheet_names': xl.sheet_names, 'selected_sheet': sheet_name,
+        'ignored_non_trip_rows': ignored_rows,
         'operating_days': days,
         'suggested_operating_days': [] if re.search(r'Mo\s*-\s*Do', sheet_name, re.I) else ['Alle Mo-Fr'] if 'Alle Mo-Fr' in days else days,
         'suggested_depot_nodes': suggested, 'all_nodes': nodes,
@@ -192,7 +205,11 @@ def scan_umlauf_excel(content, sheet_name=None):
         'charging_mappings': mapping_sheet(xl, df),
         'suggested_sites': [{'id': key, 'name': re.sub(r'\s+[AE]$', '', descriptions.get(value[0], key)), 'nodes': value} for key, value in groups.items()],
         'vehicle_types': sorted(df.apply(get_vehicle_type, axis=1).unique().tolist()),
-        'umlaeufe': [{'id': str(key), 'vehicle_types': [v for v in g.apply(get_vehicle_type, axis=1).unique().tolist() if v]} for key, g in df.groupby('Umlauf')],
+        'vehicle_type_groups': sorted({normalize_vehicle_type(v) for v in df.get('Fahrzeugtypgruppe', pd.Series(dtype=object))} - {''}),
+        'umlaeufe': [{'id': str(key),
+                     'vehicle_types': [v for v in g.apply(get_vehicle_type, axis=1).unique().tolist() if v],
+                     'vehicle_type_groups': list(dict.fromkeys(normalize_vehicle_type(v) for v in g.get('Fahrzeugtypgruppe', pd.Series(dtype=object)) if normalize_vehicle_type(v)))}
+                    for key, g in df.groupby('Umlauf')],
     }
 
 def process_umlauf_excel(file_content: bytes, settings: dict = None):
@@ -206,15 +223,16 @@ def process_umlauf_excel(file_content: bytes, settings: dict = None):
         sheet_name = 'Tabelle1' if 'Tabelle1' in xl.sheet_names else xl.sheet_names[0]
     if (not settings or 'BETRIEBSTAGE' not in settings) and re.search(r'Mo\s*-\s*Do', sheet_name, re.I):
         s['BETRIEBSTAGE'] = []
-    raw = xl.parse(sheet_name)
-    raw = raw.copy()
+    source = xl.parse(sheet_name)
+    source_row_count = len(source)
+    raw, ignored_rows = timetable_rows(source)
     required = {'Umlauf', 'Betriebstage', 'Planungsbedingung', 'Typ', 'von', 'nach', 'Startzeit', 'Endzeit', 'Meter'}
     missing = required - set(raw.columns)
     if missing:
         raise ValueError(f'Missing timetable columns in {sheet_name}: {", ".join(sorted(missing))}')
     if s['CHARGING_SITES']:
         raw['Umlauf'] = raw['Umlauf'].map(lambda value: str(value) if pd.notna(value) else np.nan)
-    raw["_source_order"] = np.arange(len(raw))
+    raw["_source_order"] = raw.index.to_numpy()
 
     cols = [
         "Umlauf", "Dienste", "Linie", "Fahrtnummer",
@@ -248,13 +266,18 @@ def process_umlauf_excel(file_content: bytes, settings: dict = None):
     overnight = df['end_min'] < df['start_min']
     df.loc[overnight, 'end_min'] += 1440
 
-    df["vehicle_type"] = df.apply(get_vehicle_type, axis=1)
+    df["vehicle_type"] = df.apply(lambda row: get_vehicle_type(row, s['USE_VEHICLE_TYPE_GROUP']), axis=1)
     if s['USE_FIRST_VEHICLE_TYPE']:
         # Resolve slash-separated alternatives per source entry, before looking
         # up consumption/capacity. Explicit per-Umlauf overrides take precedence.
         df['vehicle_type'] = df['vehicle_type'].map(lambda value: value.split('/', 1)[0].strip())
     vehicle_overrides = s['UMLAUF_VEHICLE_TYPES']
     df['vehicle_type'] = df.apply(lambda row: vehicle_overrides.get(str(row['Umlauf']), row['vehicle_type']), axis=1)
+    if s['USE_VEHICLE_TYPE_GROUP']:
+        missing_group = df[df['vehicle_type'].eq('')]
+        if not missing_group.empty:
+            rows = [int(i) + 2 for i in missing_group['_source_order']]
+            raise ValueError(f'Vehicle type group is missing in Excel rows {rows[:20]}. Fill in the group, assign the vehicle type manually per route or disable group selection.')
 
     consumptions = []
     capacities = []
@@ -396,7 +419,7 @@ def process_umlauf_excel(file_content: bytes, settings: dict = None):
             validation_warnings.append({
                 "type": "MULTIPLE_VEHICLE_TYPES",
                 "umlauf": umlauf,
-                "message": f"Umlauf {umlauf} contains multiple vehicle type entries: {list(vt_counts.index)}"
+                "message": f"Route {umlauf} contains multiple vehicle type entries: {list(vt_counts.index)}"
             })
 
         battery_capacity_kwh = float(umlauf_specs["battery_capacity_kwh"])
@@ -584,7 +607,7 @@ def process_umlauf_excel(file_content: bytes, settings: dict = None):
             })
 
     return {
-        "import_summary": {'sheet_name': sheet_name, 'source_rows': len(raw), 'imported_rows': len(df), 'excluded_rows': len(raw)-len(df), 'distance_unit': s['DISTANCE_UNIT']},
+        "import_summary": {'sheet_name': sheet_name, 'source_rows': source_row_count, 'imported_rows': len(df), 'excluded_rows': source_row_count-len(df), 'ignored_non_trip_rows': ignored_rows, 'distance_unit': s['DISTANCE_UNIT']},
         "charging_sites": s['CHARGING_SITES'],
         "cleaned_trips": cleaned.fillna("").to_dict(orient="records"),
         "charging_windows": windows_df.fillna("").to_dict(orient="records") if not windows_df.empty else [],

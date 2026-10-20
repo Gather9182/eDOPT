@@ -8,6 +8,9 @@ from .services.charging_sites import validate_sites
 from .services.feasibility import energy_feasibility_issues
 from .services.opportunity_charging import possible_availability
 from fastapi import UploadFile, File, Form
+from datetime import datetime, timezone
+from importlib.metadata import version, PackageNotFoundError
+import platform
 
 app = FastAPI(title="eDOPT Optimization API")
 
@@ -44,55 +47,79 @@ async def optimize_depot(inputs: OptimizationInputs):
         result = await run_optimization(inputs)
         return result
     except Exception as e:
+        if hasattr(e, 'diagnostics'):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=500, content={'detail': str(e), 'diagnostics': e.diagnostics})
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/data/validate")
-async def validate_inputs(inputs: OptimizationInputs):
+async def validate_inputs(inputs: OptimizationInputs, include_diagnostics: bool = False):
     """
     Validates the input data structure and internal consistency.
     """
+    def response(result):
+        for issue in result.get('issues', []):
+            prefix = issue.get('message', '').split(':', 1)[0]
+            issue.setdefault('category', 'storage' if prefix == 'BESS' else 'solar' if prefix == 'PV' else 'data')
+            issue.setdefault('code', 'BESS_CONFIGURATION' if prefix == 'BESS' else 'PV_CONFIGURATION' if prefix == 'PV' else 'INPUT_VALIDATION')
+        if include_diagnostics:
+            packages = {}
+            for package in ('fastapi', 'pydantic', 'pandas', 'pulp'):
+                try:
+                    packages[package] = version(package)
+                except PackageNotFoundError:
+                    packages[package] = None
+            result['diagnostics'] = {
+                'checked_at': datetime.now(timezone.utc).isoformat(),
+                'api_version': '1.1.0-milp', 'python_version': platform.python_version(), 'packages': packages,
+                'effective_inputs': inputs.model_dump(mode='json'),
+            }
+        return result
+
     issues = []
     sites_valid = True
     try:
         validate_sites(inputs)
     except ValueError as exc:
         sites_valid = False
-        issues.append({'type': 'ERROR', 'message': str(exc)})
+        issues.append({'type': 'ERROR', 'code': 'CHARGING_SITE_CONFIGURATION', 'category': 'infrastructure', 'message': str(exc)})
     num_periods = int((inputs.planning_horizon_hours * 60) / inputs.time_step_minutes)
     
     # Check 1: Price consistency
     if len(inputs.electricity_prices) != num_periods:
         issues.append({
             "type": "ERROR",
+            "code": "PRICE_PROFILE_LENGTH", "category": "data",
             "message": f"Electricity price data length ({len(inputs.electricity_prices)}) does not match expected periods ({num_periods})."
         })
 
     # Check 2: Constraint plausibility
     if inputs.charger_capacity_kw <= 0:
-        issues.append({"type": "ERROR", "message": "Total charger capacity must be greater than 0."})
+        issues.append({"type": "ERROR", "code": "CHARGER_CAPACITY_INVALID", "category": "infrastructure", "message": "Total charger capacity must be greater than 0."})
     if inputs.grid_limit_kw <= 0:
-        issues.append({"type": "ERROR", "message": "Grid connection limit must be greater than 0."})
+        issues.append({"type": "ERROR", "code": "GRID_LIMIT_INVALID", "category": "infrastructure", "message": "Grid connection limit must be greater than 0."})
 
     # Check 3: Bus data validation
     bus_ids = set()
     for bus in inputs.buses:
         # Check for duplicated IDs
         if bus.id in bus_ids:
-            issues.append({"type": "ERROR", "message": f"Duplicate Bus/Umlauf ID found: {bus.id}"})
+            issues.append({"type": "ERROR", "code": "DUPLICATE_ROUTE_ID", "category": "data", "bus_id": bus.id, "message": f"Duplicate route ID found: {bus.id}"})
         bus_ids.add(bus.id)
 
         # Efficiency check
         if not (0 < bus.efficiency <= 1.0):
-            issues.append({"type": "ERROR", "message": f"Bus {bus.id}: Efficiency must be between 0 and 1 (current: {bus.efficiency})"})
+            issues.append({"type": "ERROR", "code": "BUS_EFFICIENCY_INVALID", "category": "vehicle", "bus_id": bus.id, "message": f"Bus {bus.id}: Efficiency must be between 0 and 1 (current: {bus.efficiency})"})
 
         # Power vs Capacity check
         if bus.max_power_kw > inputs.charger_capacity_kw:
-            issues.append({"type": "WARNING", "message": f"Bus {bus.id}: Individual charging power ({bus.max_power_kw}kW) exceeds total depot charger capacity ({inputs.charger_capacity_kw}kW)."})
+            issues.append({"type": "WARNING", "code": "BUS_POWER_EXCEEDS_SITE_CAPACITY", "category": "infrastructure", "bus_id": bus.id, "message": f"Bus {bus.id}: Individual charging power ({bus.max_power_kw}kW) exceeds total depot charger capacity ({inputs.charger_capacity_kw}kW)."})
 
         # Check availability vector length
         if len(bus.availability) != num_periods:
             issues.append({
                 "type": "ERROR", 
+                "code": "AVAILABILITY_PROFILE_LENGTH", "category": "data", "bus_id": bus.id,
                 "message": f"Availability vector for bus {bus.id} must be {num_periods} periods long."
             })
 
@@ -101,6 +128,7 @@ async def validate_inputs(inputs: OptimizationInputs):
             issues.append({
                 "type": "WARNING",
                 "code": "NO_CHARGING_AVAILABILITY",
+                "category": "charging",
                 "bus_id": bus.id,
                 "message": f"Bus {bus.id} has NO availability for charging during the entire horizon."
             })
@@ -111,7 +139,8 @@ async def validate_inputs(inputs: OptimizationInputs):
         if total_readiness == 0 and len(inputs.buses) > 0:
             issues.append({
                 "type": "WARNING",
-                "message": "Next-day readiness is ENABLED but total morning buffer requirement is 0. Verify your Umlauf data or consider if this is intended."
+                "code": "NEXT_DAY_REQUIREMENT_EMPTY", "category": "energy",
+                "message": "Next-day readiness is enabled but the total morning energy requirement is zero. Verify the route data or disable next-day readiness if this is intended."
             })
 
     # Check 5: BESS Configuration (Stationary Storage)
@@ -147,12 +176,12 @@ async def validate_inputs(inputs: OptimizationInputs):
         issues.extend(energy_feasibility_issues(inputs))
 
     if any(issue["type"] == "ERROR" for issue in issues):
-        return {"status": "invalid", "issues": issues}
+        return response({"status": "invalid", "issues": issues})
     
     if issues:
-        return {"status": "warning", "issues": issues}
+        return response({"status": "warning", "issues": issues})
 
-    return {"status": "valid", "message": "All inputs are consistent and ready for optimization", "issues": []}
+    return response({"status": "valid", "message": "All inputs are consistent and ready for optimization", "issues": []})
 
 @app.post("/api/data/pre-scan-excel")
 async def handle_excel_pre_scan(

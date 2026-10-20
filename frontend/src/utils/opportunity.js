@@ -8,10 +8,20 @@ export function opportunityConfig(project) {
 export function mergeScannedMappings(existing, scanned) {
   const key = row => `${normalize(row.stop_name)}|${normalize(row.target_name)}`;
   return scanned.map(row => {
-    const previous = existing.find(old => key(old) === key(row));
-    return { ...row, ...previous, id:row.id,
-      outbound_km:previous?.outbound_km ?? row.outbound_km, return_km:previous?.return_km ?? row.return_km,
-      nodes:previous?.nodes_overridden ? previous.nodes : row.nodes.length ? row.nodes : previous?.nodes || [] };
+    const previous = existing.find(old => !old.manual && normalize(old.target_name) === normalize(row.target_name) &&
+      (old.source_node_code && row.source_node_code ? normalize(old.source_node_code) === normalize(row.source_node_code) : key(old) === key(row)));
+    const fields = ['outbound_minutes', 'return_minutes', 'outbound_km', 'return_km'];
+    const source_values = Object.fromEntries(fields.map(field => [field, row[field]]));
+    const merged = { ...previous, ...row, source_values,
+      enabled:previous?.enabled ?? row.enabled, site_id:previous?.site_id || row.site_id,
+      nodes:previous?.nodes_overridden ? previous.nodes : row.nodes,
+      overridden_fields:previous?.overridden_fields || [] };
+    for (const field of fields) {
+      // New workbook values replace stale imports; only explicit edits override
+      // them. Keep legacy user-supplied values when Excel still has no value.
+      if (previous?.overridden_fields?.includes(field) || (row[field] == null && previous?.[field] != null)) merged[field] = previous[field];
+    }
+    return merged;
   }).concat(existing.filter(row => row.manual));
 }
 
@@ -24,6 +34,17 @@ export function resolvedOpportunityConfig(project) {
     const matches = sites.filter(site => site.nodes.some(node => directNodes.includes(node)) || normalize(site.name) === normalize(row.target_name));
     return { ...row, site_id:row.site_id || (matches.length === 1 ? matches[0].id : '') };
   }) };
+}
+
+// Disabling matters just as much as enabling: imported visits also influence
+// the next-day energy requirement, which must be recalculated from the source.
+export function opportunityImportNeedsRefresh(project) {
+  const current = resolvedOpportunityConfig(project);
+  const saved = project.meta?.opportunity_import_signature;
+  let wasEnabled = false;
+  try { wasEnabled = Boolean(JSON.parse(saved)?.enabled); } catch { /* Legacy imports have no signature. */ }
+  const hasImportedVisits = (project.buses || []).some(bus => bus.opportunity_visits?.length);
+  return Boolean((current.enabled || wasEnabled || hasImportedVisits) && saved !== JSON.stringify(current));
 }
 
 // Save the actual transfer consumption/trips alongside the exact solver inputs,

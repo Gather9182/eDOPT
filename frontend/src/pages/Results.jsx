@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { getItem, setItem } from '../utils/db';
 import ChargingSiteResults from '../components/ChargingSiteResults';
+import { buildChargingSessions } from '../utils/chargingOrigin';
 import ExcludedRoutesNotice from '../components/ExcludedRoutesNotice';
 
 const toMinutesForSort = (hhmm) => {
@@ -2750,7 +2751,7 @@ const Results = () => {
       {!isDrillDown && results.is_long_term && (
         <div className={`grid grid-cols-4 gap-6 mb-8`}>
           {stats.map((stat, i) => (
-            <div key={i} className="card stat-card shadow-sm flex-col items-start gap-2 hover:shadow-md transition-all">
+            <div key={i} className="card stat-card shadow-sm flex-col items-start gap-2">
               <div className="flex items-center gap-3 w-full">
                 <div className="stat-icon">{stat.icon}</div>
                 <div className="stat-info flex-1">
@@ -4043,10 +4044,12 @@ const Results = () => {
                 {results.bus_diagnostics?.slice(0, isFleetExpanded ? undefined : 10).map((diag) => {
                   const isExpanded = expandedBus === diag.id;
                   const socProfile = results.soc_profiles?.[diag.id] || [];
-                  const simSteps = results.aggregated_load_profile.length;
+                  const simSteps = results.schedules?.[diag.id]?.length || results.aggregated_load_profile.length;
                   const simHours = simSteps * dt;
                   
                   const busData = results.run_metadata?.inputs?.buses?.find(b => String(b.id) === String(diag.id));
+                  const tripNodeLabel = (node, description) => description ||
+                    results.run_metadata?.inputs?.charging_sites?.find(site => site.id === node)?.name || node;
                   let trips = [...(busData?.trips || [])];
                   if (results.is_long_term && selectedDay !== null) {
                     const dayStart = Number(selectedDay)*1440;
@@ -4059,9 +4062,12 @@ const Results = () => {
                   
                   // For multi-day scenarios, replicate the trip sequence for the second day if not provided
                   if (simHours > 24 && trips.length > 0) {
-                    const maxTripTime = Math.max(...trips.map(t => t.start_min || t.start_time_min || toMinutesForSort(t.start)));
+                    // Only the scheduled route repeats. Optional detours are
+                    // already recorded individually by the solver.
+                    const scheduledTrips = trips.filter(t => !t.opportunity_id);
+                    const maxTripTime = Math.max(...scheduledTrips.map(t => t.start_min || t.start_time_min || toMinutesForSort(t.start)));
                     if (maxTripTime < 1440) {
-                       const day2Trips = trips.map(t => {
+                       const day2Trips = scheduledTrips.map(t => {
                           const startMin = (t.start_min !== undefined ? t.start_min : t.start_time_min !== undefined ? t.start_time_min : toMinutesForSort(t.start)) + 1440;
                           const endMin = (t.end_min !== undefined ? t.end_min : t.end_time_min !== undefined ? t.end_time_min : toMinutesForSort(t.end)) + 1440;
                           return {
@@ -4077,9 +4083,9 @@ const Results = () => {
                   }
                   
                   // Weave charging into trips
-                  const chargingEvents = [];
-                  const schedule = results.schedules?.[diag.id] || [];
-                  let currentCharge = null;
+                  const chargingEvents = buildChargingSessions(results, diag.id, {
+                    offsetMinutes: results.is_long_term && selectedDay !== null ? Number(selectedDay) * 1440 : 0,
+                  });
                   
                   // Calculate cyclic buffer (Look-Ahead emulation)
                   // If look-ahead is ON but backend provided 0 (no Day 3 data), we look at early morning trips of Day 1
@@ -4090,36 +4096,6 @@ const Results = () => {
                   const cyclicBuffer = morningTrips.reduce((acc, t) => acc + (t.energy_kwh || 0), 0);
                   const effectiveBuffer = diag.next_day_required_energy_kwh || (results.run_metadata?.inputs?.use_next_day_readiness ? cyclicBuffer : 0);
                   
-                  schedule.forEach((kw, t) => {
-                      if (kw > 5) { // 5kW threshold
-                          if (!currentCharge) {
-                              currentCharge = {
-                                  type: 'C',
-                                  start: `${Math.floor(t * timeStepMin / 60)}:${String(t * timeStepMin % 60).padStart(2, '0')}`,
-                                  startTimeMin: t * timeStepMin,
-                                  kWs: [kw]
-                              };
-                          } else {
-                              currentCharge.kWs.push(kw);
-                          }
-                      } else {
-                          if (currentCharge) {
-                              const endT = t;
-                              currentCharge.end = `${Math.floor(endT * timeStepMin / 60)}:${String(endT * timeStepMin % 60).padStart(2, '0')}`;
-                              currentCharge.avgKw = currentCharge.kWs.reduce((a,b)=>a+b,0) / currentCharge.kWs.length;
-                              currentCharge.totalKwh = (currentCharge.avgKw * currentCharge.kWs.length * dt);
-                              chargingEvents.push(currentCharge);
-                              currentCharge = null;
-                          }
-                      }
-                  });
-                  if (currentCharge) {
-                      currentCharge.end = `${Math.floor(simSteps * timeStepMin / 60)}:00`;
-                      currentCharge.avgKw = currentCharge.kWs.reduce((a,b)=>a+b,0) / currentCharge.kWs.length;
-                      currentCharge.totalKwh = (currentCharge.avgKw * currentCharge.kWs.length * dt);
-                      chargingEvents.push(currentCharge);
-                  }
-
                   const mergedSequence = [
                       ...trips.map(t => ({
                         ...t, 
@@ -4319,13 +4295,14 @@ const Results = () => {
                                             seg.type === 'C' ? 'text-success' : 
                                             seg.is_technical ? 'bg-muted/10 text-muted opacity-60 px-2 py-0.5 rounded' : 'bg-border/20 text-muted px-2 py-0.5 rounded'
                                           }`}>
-                                             {seg.type === 'C' ? 'Charging Session' : seg.is_technical ? 'Log Point' : seg.type === 'A' ? 'Depot Arrival' : seg.type === 'E' ? 'Depot Departure' : 'Transit'}
+                                             {seg.type === 'C' ? <span className={`charging-origin-badge charging-origin-${seg.origin}`}>{seg.badge}</span> : seg.opportunity_id ? 'Charging detour trip' : seg.is_technical ? 'Log Point' : seg.type === 'A' ? 'Depot Arrival' : seg.type === 'E' ? 'Depot Departure' : 'Transit'}
                                           </div>
                                         </div>
                                         
                                         {seg.type === 'C' ? (
                                           <div className="flex flex-col">
-                                            <span className="text-xs font-bold text-success">Depot Charger Active</span>
+                                            <span className="text-xs font-bold text-success">{seg.label}{seg.siteName ? ` · ${seg.siteName}` : ''}</span>
+                                            <span className="text-[10px] text-muted mt-0.5">{seg.explanation}</span>
                                             <div className="text-[10px] text-muted mt-0.5">
                                               Avg: {Math.round(seg.avgKw)} kW • Energy Added: {seg.totalKwh.toFixed(1)} kWh
                                             </div>
@@ -4333,9 +4310,9 @@ const Results = () => {
                                         ) : (
                                           <>
                                             <div className="flex items-center gap-2">
-                                              <span className={`${seg.is_technical ? 'text-[10px]' : 'text-xs font-bold'} text-app`}>{seg.von_desc || seg.von}</span>
+                                              <span className={`${seg.is_technical ? 'text-[10px]' : 'text-xs font-bold'} text-app`}>{tripNodeLabel(seg.von, seg.von_desc)}</span>
                                               {!seg.is_technical && <ArrowRight size={12} className="text-muted opacity-40" />}
-                                              {!seg.is_technical && <span className="text-xs font-bold text-app">{seg.nach_desc || seg.nach}</span>}
+                                              {!seg.is_technical && <span className="text-xs font-bold text-app">{tripNodeLabel(seg.nach, seg.nach_desc)}</span>}
                                             </div>
                                             {!seg.is_technical && (
                                               <div className="text-[10px] text-muted mt-1">

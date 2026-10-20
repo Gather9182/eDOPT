@@ -30,7 +30,7 @@ class EnergyFeasibilityTests(unittest.TestCase):
 
     def test_site_power_and_efficiency_can_prevent_required_final_soc(self):
         data = inputs([bus('slow', efficiency=.5)], [{**site(), 'charger_power_kw':20}])
-        self.assertIn('höchstens 10.0 kWh',energy_feasibility_issues(data)[0]['message'])
+        self.assertIn('At most 10.0 kWh',energy_feasibility_issues(data)[0]['message'])
 
     def test_pv_at_own_site_can_supply_bus_even_without_grid_capacity(self):
         data = inputs([bus('pv')], [{**site(), 'grid_limit_kw':0}], scenario='pv',energy_site_id='D')
@@ -41,7 +41,7 @@ class EnergyFeasibilityTests(unittest.TestCase):
     def test_shared_connectors_and_locks_are_not_claimed_feasible_by_energy_bounds(self):
         data = inputs([bus('a'),bus('b')], [site(no_switch_windows=[dict(start='00:00',end='00:00')])])
         self.assertEqual(energy_feasibility_issues(data), [])
-        with self.assertRaisesRegex(RuntimeError,'Umstecksperren'):
+        with self.assertRaisesRegex(RuntimeError,'switching restrictions'):
             run_offline(run_optimization(data))
 
     def test_legacy_simultaneous_consumption_uses_same_capacity_bound_as_solver(self):

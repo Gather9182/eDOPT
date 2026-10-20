@@ -1,3 +1,4 @@
+import CustomSelect from '../components/CustomSelect';
 import React, { useState, useRef, useEffect } from 'react';
 import { Upload, Table as TableIcon, Plus, Save, AlertCircle, Loader2, FileSpreadsheet, Check, Zap, Download, Clock, TrendingUp, Info, Circle, Settings, Battery, MapPin, ArrowRight } from 'lucide-react';
 import { preScanExcel, processExcel, fetchAWattarPrices, getPricesForOptimization } from '../services/api';
@@ -7,7 +8,7 @@ import OpportunityChargingEditor from '../components/OpportunityChargingEditor';
 import { opportunityConfig, mergeScannedMappings } from '../utils/opportunity';
 import TimetableImportOptions from '../components/TimetableImportOptions';
 import { getItem, setItem } from '../utils/db';
-import { timetableSettings, timetableFingerprint, processTimetableDraft, projectWithTimetable, saveTimetableSource, loadTimetableSource } from '../utils/timetableImport';
+import { importedVehicleTypes, timetableSettings, timetableFingerprint, processTimetableDraft, projectWithTimetable, saveTimetableSource, loadTimetableSource } from '../utils/timetableImport';
 
 const InfoTooltip = ({ title, text, align = 'center' }) => (
   <div className="tooltip-container">
@@ -33,7 +34,7 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
   const [initialSoc, setInitialSoc] = useState((projectData.meta.initial_soc_fraction ?? 1) * 100);
   const [minFinalSoc, setMinFinalSoc] = useState((projectData.meta.min_final_soc_fraction ?? .2) * 100);
   const [scan, setScan] = useState(projectData.meta.timetable_scan || null);
-  const [importOptions, setImportOptions] = useState(() => ({ sheet: '', days: ['Alle Mo-Fr'], distanceUnit: 'legacy', mixedThreshold: 50, vehicleOverrides: {}, useFirstVehicleType: false, ...projectData.meta.import_settings }));
+  const [importOptions, setImportOptions] = useState(() => ({ sheet: '', days: ['Alle Mo-Fr'], distanceUnit: 'legacy', mixedThreshold: 50, vehicleOverrides: {}, useFirstVehicleType: false, useVehicleTypeGroup: false, ...projectData.meta.import_settings }));
 
   const [uploadedFile, setUploadedFile] = useState(null);
   const [suggestedDepots, setSuggestedDepots] = useState(projectData.meta.timetable_scan?.suggested_depot_nodes || []);
@@ -44,7 +45,7 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
   const sourceName = uploadedFile?.name || projectData.meta.timetable_source_name || '';
   const configurationTypes = [...new Set(scan ? scan.umlaeufe.flatMap(bus => {
     const override = importOptions.vehicleOverrides[bus.id];
-    return override ? [override] : bus.vehicle_types.map(type => importOptions.useFirstVehicleType ? type.split('/', 1)[0].trim() : type);
+    return override ? [override] : importedVehicleTypes(bus, importOptions);
   }) : (projectData.buses || []).map(bus => bus.vehicle_type).filter(Boolean))];
 
   const tabs = [
@@ -75,7 +76,7 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
       setShowDepotConfig(true);
     } catch (err) {
       console.error(err);
-      setInputError(err.response?.data?.detail || 'Die Excel-Datei konnte nicht gelesen werden. Bitte das Format prüfen.');
+      setInputError(err.response?.data?.detail || 'The Excel file could not be read. Please check the file format.');
     } finally {
       setIsProcessing(false);
     }
@@ -89,7 +90,7 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
     setShowDepotConfig(false);
     try {
       const file = uploadedFile || await loadTimetableSource(projectData.meta.timetable_source_key, getItem);
-      if (!file) throw new Error('Bitte die ursprüngliche Excel-Datei erneut hochladen.');
+      if (!file) throw new Error('Please upload the original Excel file again.');
       const result = await preScanExcel(file, sheet);
       setScan(result);
       setProjectData(prev => ({...prev,charging:{...prev.charging,opportunity:{...opportunityConfig(prev),mappings:mergeScannedMappings(opportunityConfig(prev).mappings,result.charging_mappings || [])}}}));
@@ -105,6 +106,25 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
     }
   };
 
+  const handleImportOptionsChange = async value => {
+    setImportOptions(value);
+    setCurrentExcelResult(null);
+    // Refresh scans saved before vehicle groups were included, without resetting
+    // the user's node assignments, filters or explicit vehicle selections.
+    if (!value.useVehicleTypeGroup || scan?.vehicle_type_groups !== undefined) return;
+    setInputError('');
+    setIsProcessing(true);
+    try {
+      const file = uploadedFile || await loadTimetableSource(projectData.meta.timetable_source_key, getItem);
+      if (!file) throw new Error('Please upload the original Excel file again to read the vehicle type groups.');
+      setScan(await preScanExcel(file, value.sheet));
+    } catch (err) {
+      setInputError(err.response?.data?.detail || err.message);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   const processCurrentInputs = async (continueToSettings = false) => {
     if (isProcessing || priceBusy) return;
     const version = ++operationVersion.current;
@@ -113,7 +133,7 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
     setInputError('');
     try {
       if (uploadedFile && (!scan || scan.selected_sheet !== importOptions.sheet)) {
-        throw new Error('Bitte ein gültiges Tabellenblatt auswählen.');
+        throw new Error('Please select a valid timetable sheet.');
       }
       const file = uploadedFile || await loadTimetableSource(projectData.meta.timetable_source_key, getItem);
       const context = { projectData, options: importOptions, selectedDepots, initialSoc, minFinalSoc,
@@ -125,7 +145,7 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
         const requestedDate = nextProject.meta.price_requested_date;
         if (requestedDate && (requestedDate !== nextProject.meta.price_date || !nextProject.pricing?.length)) {
           const prices = await getPricesForOptimization(requestedDate, nextProject.meta.planning_horizon, nextProject.meta.time_resolution);
-          if (!prices.prices?.length) throw new Error('Für das ausgewählte Datum wurden keine Strompreise gefunden.');
+          if (!prices.prices?.length) throw new Error('No electricity prices were found for the selected date.');
           nextProject = { ...nextProject, pricing: prices.prices, meta: { ...nextProject.meta, price_date: requestedDate, price_unit: 'EUR/MWh', price_source: 'awattar' } };
         }
         context.sourceKey = uploadedFile ? await saveTimetableSource(file, setItem) : projectData.meta.timetable_source_key;
@@ -202,7 +222,7 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
             handleProcessClick={handleProcessClick}
             chargingMode={Boolean(projectData.charging?.enabled)}
             configureChargingSites={() => setActiveSubTab('charging')}
-            importControls={<TimetableImportOptions scan={scan} options={importOptions} disabled={isProcessing} onSheetChange={handleSheetChange} onChange={value => { setImportOptions(value); setCurrentExcelResult(null); }} initialSoc={initialSoc} setInitialSoc={setInitialSoc} minFinalSoc={minFinalSoc} setMinFinalSoc={setMinFinalSoc} vehicleTypes={[...new Set([...(scan?.vehicle_types || []), ...Object.keys(projectData.meta.vehicle_types_config || {})])]} />}
+            importControls={<TimetableImportOptions scan={scan} options={importOptions} disabled={isProcessing} onSheetChange={handleSheetChange} onChange={handleImportOptionsChange} initialSoc={initialSoc} setInitialSoc={setInitialSoc} minFinalSoc={minFinalSoc} setMinFinalSoc={setMinFinalSoc} vehicleTypes={[...new Set([...((importOptions.useVehicleTypeGroup ? scan?.vehicle_type_groups : scan?.vehicle_types) || []), ...Object.keys(projectData.meta.vehicle_types_config || {})])]} />}
           />
         )}
         {activeSubTab === 'constraints' && (
@@ -589,7 +609,7 @@ const UmlaufplanTab = ({
       </div>
 
       {importControls}
-      {processedData?.import_summary && <p className="mb-4 text-sm">Blatt <strong>{processedData.import_summary.sheet_name}</strong>: {processedData.import_summary.imported_rows} von {processedData.import_summary.source_rows} Zeilen übernommen; {processedData.import_summary.excluded_rows} durch Filter ausgeschlossen. {processedData.bus_inputs.length} Umläufe.</p>}
+      {processedData?.import_summary && <p className="mb-4 text-sm">Blatt <strong>{processedData.import_summary.sheet_name}</strong>: {processedData.import_summary.imported_rows} von {processedData.import_summary.source_rows} Zeilen übernommen; {processedData.import_summary.excluded_rows - (processedData.import_summary.ignored_non_trip_rows?.length || 0)} durch Filter ausgeschlossen. {processedData.import_summary.ignored_non_trip_rows?.length > 0 && <>Leere Export-/Summenzeilen übersprungen (Excel-Zeilen {processedData.import_summary.ignored_non_trip_rows.join(', ')}). </>}{processedData.bus_inputs.length} Umläufe.</p>}
       {showDepotConfig && (
         <div className="depot-config-card">
           <div className="depot-config-title">
@@ -632,7 +652,7 @@ const UmlaufplanTab = ({
           
           <div>
             <span className="depot-section-label">ALL TIMETABLE NODES:</span>
-            <select
+            <CustomSelect
               multiple
               className="depot-select"
               value={selectedDepots}
@@ -644,7 +664,7 @@ const UmlaufplanTab = ({
               {allNodes.map(node => (
                 <option key={node} value={node}>{node}</option>
               ))}
-            </select>
+            </CustomSelect>
             <span className="text-[10px] text-muted block mt-1">
               Hold Ctrl (Windows) or Cmd (Mac) to select multiple custom nodes.
             </span>
@@ -843,7 +863,7 @@ const UmlaufplanTab = ({
                         <td>{row.Umlauf}</td>
                         <td>{row.start_hhmm}</td>
                         <td>{row.end_hhmm}</td>
-                        <td>{row.dur_min?.toFixed(1)}m</td>
+                        <td>{Number.isFinite(Number.parseFloat(row.dur_min)) ? `${Number.parseFloat(row.dur_min).toFixed(1)}m` : '—'}</td>
                         <td>{row.von}</td>
                         <td><span className="text-xs text-muted truncate max-w-[100px] inline-block">{row['von (Beschreibung)']}</span></td>
                         <td>{row.nach}</td>
@@ -883,7 +903,7 @@ const UmlaufplanTab = ({
               )}
 
               {activeResultTab === 'matrix' && (
-                <><label className="block mb-3">Ladeort <select aria-label="Matrix Ladeort" className="input" value={matrixSite} onChange={e => setMatrixSite(e.target.value)}><option value="">Alle Ladeorte</option>{(processedData.charging_sites || []).map(site => <option key={site.id} value={site.id}>{site.name || site.id}</option>)}</select></label>
+                <><label className="matrix-site-filter mb-3">Ladeort <CustomSelect aria-label="Matrix Ladeort" className="form-input" value={matrixSite} onChange={e => setMatrixSite(e.target.value)}><option value="">Alle Ladeorte</option>{(processedData.charging_sites || []).map(site => <option key={site.id} value={site.id}>{site.name || site.id}</option>)}</CustomSelect></label>
                 <table className="data-table border-collapse" ref={tableRef}>
                   <thead>
                     <tr>
@@ -1183,12 +1203,12 @@ const PricingTab = ({ projectData, setProjectData, onBusyChange, onError }) => {
     try {
       const data = await fetchAWattarPrices(selectedDate);
       const result = await getPricesForOptimization(selectedDate, projectData.meta.planning_horizon || 24, projectData.meta.time_resolution || 15);
-      if (!result.prices?.length) throw new Error('Für das ausgewählte Datum wurden keine Strompreise gefunden.');
+      if (!result.prices?.length) throw new Error('No electricity prices were found for the selected date.');
       setPriceData(data.prices);
       setProjectData(prev => ({ ...prev, pricing: result.prices, meta: { ...prev.meta, price_date: selectedDate, price_requested_date: selectedDate, price_preview: data.prices, price_unit: 'EUR/MWh', price_source: 'awattar' } }));
     } catch (err) {
       console.error(err);
-      onError(err.response?.data?.detail || err.message || 'Die Strompreise konnten nicht geladen werden.');
+      onError(err.response?.data?.detail || err.message || 'Electricity prices could not be loaded.');
     } finally {
       setIsLoading(false);
       onBusyChange(false);

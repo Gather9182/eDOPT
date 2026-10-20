@@ -5,6 +5,8 @@ from .solver import run_milp_solver, run_scenario_optimization, update_cell_temp
 from .pv_service import PVService
 from .weather_service import WeatherService
 from .feasibility import energy_feasibility_issues
+from .solver_diagnostics import OptimizationFailure
+from .route_feasibility import classify_routes
 
 async def run_optimization(inputs: OptimizationInputs) -> OptimizationResult:
     """
@@ -14,7 +16,8 @@ async def run_optimization(inputs: OptimizationInputs) -> OptimizationResult:
     solver_logs = []
     energy_issues = energy_feasibility_issues(inputs) if inputs.charging_sites else []
     if energy_issues:
-        raise RuntimeError('Kein zulässiger Ladeplan: ' + '\n'.join(issue['message'] for issue in energy_issues))
+        raise OptimizationFailure('No feasible charging schedule: ' + '\n'.join(issue['message'] for issue in energy_issues),
+            dict(solver_status='Precheck failed', issues=energy_issues, effective_inputs=inputs.model_dump(mode='json'), solver_logs=solver_logs))
     try:
         res = await run_scenario_optimization(inputs, solver_logs)
         res.solver_logs = solver_logs
@@ -24,10 +27,22 @@ async def run_optimization(inputs: OptimizationInputs) -> OptimizationResult:
         if inputs.charging_sites or inputs.use_charging_sites or any(bus.opportunity_visits for bus in inputs.buses):
             # The legacy fallback has no physical connection model. Never
             # return an apparently feasible schedule that ignores site locks.
-            raise RuntimeError(f'Kein zulässiger Ladeplan für die aktuellen Ladeorte und Umstecksperren: {err_str}. '
-                               'Der Ausschluss von Umläufen ohne Ladefenster garantiert noch keine machbare Lösung. '
-                               'Auch bei ausreichender Energie je Bus können gemeinsame Ladepunkte, Lade- und Netzleistung '
-                               'oder Umstecksperren die Flotte begrenzen. Die globalen Leistungsgrenzen gelten zusätzlich zu den Standortgrenzen.') from e
+            diagnostics = getattr(e, 'diagnostics', dict(solver_status='Error', effective_inputs=inputs.model_dump(mode='json'), solver_logs=solver_logs))
+            if diagnostics.get('solver_status') == 'Infeasible':
+                try:
+                    diagnostics['route_feasibility'] = await classify_routes(inputs,
+                        diagnostics.get('energy_relaxation', {}).get('findings', []))
+                except Exception as diagnostic_error:
+                    # An optional diagnostic must not erase the original failed
+                    # model, CBC log or error message.
+                    diagnostics['route_feasibility'] = dict(completed=False, error=str(diagnostic_error), routes=[
+                        dict(bus_id=bus.id,status='not_determined',diagnostic_candidate=False,
+                             solver_status='Error',reason='The individual diagnostic could not be completed.') for bus in inputs.buses])
+            raise OptimizationFailure(f'No feasible charging schedule for the current charging locations and switching restrictions: {err_str}. '
+                               'Excluding routes without charging windows does not guarantee feasibility. '
+                               'Even if each bus has sufficient energy individually, shared connectors, charging power, grid capacity '
+                               'or switching restrictions can limit the fleet. Global power limits apply in addition to site limits.',
+                               diagnostics) from e
         print(f"Solver failed: {err_str}. Falling back to heuristic.")
         res = await run_placeholder_optimization(inputs, solver_logs, error_msg=err_str)
         res.solver_logs = solver_logs
