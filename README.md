@@ -34,7 +34,7 @@ A web-based research prototype for analyzing electricity procurement and chargin
 
 ## Research Context
 
-eDOPT was developed by **Martin Pfeiffer, BSc.** as the software artifact of the master's thesis:
+eDOPT was originally developed by **Martin Pfeiffer, MSc. BSc.** as the software artifact of the master's thesis:
 
 > *Electricity Procurement Cost Minimization for Depot Charging of Electric Buses: An Optimization-Based Decision-Support Framework*
 
@@ -42,7 +42,13 @@ The thesis was conducted at the **Vienna University of Economics and Business (W
 
 Academic supervision was provided by **Behnam Zakeri, DSc.**, with **Dr. Amin Anjomshoaa** as co-supervisor. The project was developed in cooperation with the **ÖBB Open Innovation** and **Postbus GmbH**. The industry partners contributed to the underlying problem definition, provided operational context and case-study data, and supported the applied development of the framework.
 
-The repository contains the implementation of the decision-support tool developed for the thesis. Confidential operational data used in the Wels case study are not included.
+The repository contains the original thesis-based decision-support tool and its subsequent development. Confidential operational data used in the Wels case study are not included.
+
+### Development after the thesis
+
+**The current repository has evolved beyond the version used in the master's thesis. All updates described in the recent development work were introduced after completion of the thesis.** These include the expanded charging-location and switching rules, optional charging trips, refined route diagnostics, historical price caching and averaging, flat-rate analysis and comparisons, parallel Daily Cyclic analysis with PV/BESS and cached historical weather, and the revised results, progress and export interfaces.
+
+The feature descriptions and usage instructions below document the current application. They must not be interpreted as a list of features implemented or evaluated in the thesis. The thesis findings refer to the implementation, assumptions and case-study runs used at that time; subsequent enhancements are further developments and are not retroactively part of its empirical evaluation.
 
 ---
 
@@ -445,7 +451,7 @@ The optimization results should be interpreted as scenario-based outputs under t
 - capital expenditure, financing, maintenance, degradation, and replacement costs are outside the model scope
 - PV export and BESS electricity sales are not represented in the current formulation
 
-The implementation includes fallback and diagnostic functions for testing and scenario exploration. The thesis results are based on successful runs of the exact MILP formulation.
+The current implementation includes diagnostic functions and subsequent extensions for scenario exploration. The thesis results refer to successful runs of the MILP formulation and implementation used for the thesis. They do not constitute validation of features introduced after its completion.
 
 ---
 
@@ -459,10 +465,10 @@ Commercial use, redistribution as part of a paid service, or incorporation into 
 
 ## Acknowledgements
 
-This project was developed as part of a master's thesis at WU Vienna under the supervision of **Behnam Zakeri, DSc.**, with **Dr. Amin Anjomshoaa** as co-supervisor.
+The original thesis project was developed at WU Vienna under the supervision of **Behnam Zakeri, DSc.**, with **Dr. Amin Anjomshoaa** as co-supervisor.
 
 The practical problem setting and case-study context were developed in cooperation with the **ÖBB Open Innovation** and **Postbus GmbH**. Particular thanks are due to **Jan Hilmar, PhD**, and **Felix Grossar, MA**, for their guidance, operational insights, and support with the case-study data.
 
 <div align="center">
-  <sub>Master's thesis project by Martin Pfeiffer, BSc. | WU Vienna | In cooperation with ÖBB Open Innovation and Postbus GmbH</sub>
+  <sub>Thesis-based tool and subsequent development by Martin Pfeiffer, MSc. BSc. | Original thesis: WU Vienna, in cooperation with ÖBB Open Innovation and Postbus GmbH</sub>
 </div>
