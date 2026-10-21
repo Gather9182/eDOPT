@@ -48,7 +48,7 @@ def strict_range_prices(start,end,resolution,raw,price_window_minutes=None):
         snapshot_hash=fingerprint,source_intervals=evidence,price_aggregation=dict(window_minutes=price_window_minutes,method='duration_weighted_mean',alignment='Europe/Vienna local midnight',solver_resolution_minutes=resolution))
 
 
-async def selected_market_prices(date,hours=24,resolution=15,source='smard',provider=None,history=None,price_window_minutes=15):
+async def selected_market_prices(date,hours=24,resolution=15,source='smard',provider=None,history=None,price_window_minutes=15,flat_rate_eur_kwh=None):
     if source not in ('smard','awattar'):raise PriceDataError('INVALID_SOURCE','Choose smard or awattar explicitly.')
     if hours<1 or hours>3661*24 or resolution<1 or 1440%resolution or hours*60%resolution:
         raise PriceDataError('INVALID_REQUEST','Price horizon must fit the selected resolution and be at most 3661 days.')
@@ -57,6 +57,14 @@ async def selected_market_prices(date,hours=24,resolution=15,source='smard',prov
         try:historical_day_grid(day,resolution)
         except ValueError as error:raise PriceDataError('DST_UNSUPPORTED_HORIZON',f'{day}: this Short-Term/Flexible horizon includes a 23/25-hour date. Use Daily Cyclic to skip DST dates explicitly; no artificial 24-hour profile is generated.') from error
     start=historical_day_bounds(date)[0];end=start+dt.timedelta(hours=hours)
+    if flat_rate_eur_kwh is not None:
+        if not math.isfinite(flat_rate_eur_kwh) or flat_rate_eur_kwh<0:
+            raise PriceDataError('INVALID_REQUEST','Flat rate must be finite and non-negative in EUR/kWh.')
+        n=int(hours*60/resolution)
+        return dict(date=date,prices=[flat_rate_eur_kwh*1000]*n,market_prices=[flat_rate_eur_kwh*1000]*n,
+            timestamps=[(start+dt.timedelta(minutes=i*resolution)).isoformat() for i in range(n)],
+            selected_source='flat_rate',source='User-defined flat rate',coverage='complete',unit='EUR/MWh',
+            price_mode='flat_rate',flat_rate_base_eur_kwh=flat_rate_eur_kwh,source_intervals=[])
     if source=='smard':
         raw=(history or HistoricalPrices()).store.read(start,end)
     else:

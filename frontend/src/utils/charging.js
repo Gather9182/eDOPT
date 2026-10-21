@@ -35,7 +35,7 @@ export function locationProfilesForHorizon(bus, targetLength, targetStep, source
 export function chargingInputs(projectData) {
   return projectData.charging?.enabled ? { use_charging_sites: true, charging_sites:(projectData.charging.sites || []).map(site => {
     const mode = site.lock_charging_mode || 'automatic_balanced';
-    return {...site,lock_charging_mode:mode,allow_connect_on_arrival:mode === 'automatic_balanced' ? false : site.allow_connect_on_arrival ?? true};
+    return {...site,lock_charging_mode:mode,allow_connect_on_arrival:true};
   }), energy_site_id: projectData.charging.energy_site_id || null } : {};
 }
 

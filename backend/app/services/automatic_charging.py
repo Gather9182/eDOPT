@@ -119,4 +119,4 @@ def add_automatic_charging(problem, inputs, states, site_state, opportunities, c
                 else:
                     problem += power >= cap*power_full
     if logs is not None:
-        logs.append('[Automatic charging] Locked locations use maximum available power with capped equal shares; new connections are prohibited.')
+        logs.append('[Automatic charging] Locked locations use maximum available power with capped equal shares; arrivals may connect to free connectors and parked buses retain their connections.')

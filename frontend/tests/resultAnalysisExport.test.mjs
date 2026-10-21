@@ -172,3 +172,14 @@ test('missing profile values remain blank and are not converted into a successfu
   assert.equal(reconciliation.cost_eur_from_profile,null);
   assert.ok(manifest.missing_information.some(note=>note.startsWith('Energy/cost reconciliation is incomplete')));
 });
+
+test('flat-rate analysis ZIP preserves saved tariff and extra comparison',async()=>{
+ const {results,project}=fixture();
+ results.price_assumption={mode:'flat_rate',base_eur_kwh:.2,effective_eur_mwh:210};
+ results.flat_rate_comparison={enabled:true,comparable:true,base_eur_kwh:.2,effective_eur_mwh:210,baseline_cost_eur:4,savings_eur:2.5};
+ const exported=await resultAnalysisFiles(results,project,lookup);
+ const files=Array.isArray(exported) ? exported : exported.files;
+ const saved=files.find(file=>file.name==='run/flat_rate.json');
+ assert.equal(JSON.parse(saved.data).comparison.baseline_cost_eur,4);
+ assert.ok(files.some(file=>file.name==='tables/flat_rate_comparison.csv'));
+});

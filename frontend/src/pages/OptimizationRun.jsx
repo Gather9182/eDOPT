@@ -1,3 +1,4 @@
+import {flatRateSettings,flatRateIssues,flatRateQuotes,applyFlatRateInputs,mergeFlatRateResults,priceEvidenceForRun} from '../utils/flatRate';
 import CustomSelect from '../components/CustomSelect';
 import OptimizationProgress from '../components/OptimizationProgress';
 import DailyRunProgress from '../components/DailyRunProgress';
@@ -133,7 +134,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
   const { included: activeBuses, excluded: excludedBuses } = optimizationFleet(projectData);
   // A check applies only to the fleet and settings that were actually checked.
   const validationKeyFor = buses => JSON.stringify({ buses, localSettings, scenario, pvConfig, bessConfig, weatherDate, simulationMode, longTermConfig,
-    charging: chargingInputs(projectData), opportunity: resolvedOpportunityConfig(projectData), pricing: projectData.pricing,priceSelection:priceSelection(projectData),priceDate:projectData.meta.price_requested_date,priceLoadKey:projectData.meta.price_load_key,
+    charging: chargingInputs(projectData), opportunity: resolvedOpportunityConfig(projectData), pricing: projectData.pricing,priceSelection:priceSelection(projectData),flatRate:flatRateSettings(projectData),priceDate:projectData.meta.price_requested_date,priceLoadKey:projectData.meta.price_load_key,
     initialSoc: projectData.meta.initial_soc_fraction, reserve: projectData.meta.min_final_soc_fraction,
     sourceStep: projectData.meta.time_resolution, latitude: projectData.meta.latitude, longitude: projectData.meta.longitude });
   const validationResult = validationState?.key === validationKeyFor(activeBuses) ? validationState.result : null;
@@ -264,6 +265,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     activeBuses.map(bus => bus.id));
 
   const requestOptimization = async (inputs, attempt = {}, {signal=runAbortRef.current?.signal} = {}) => {
+    inputs=applyFlatRateInputs(analysisRunRef.current?.context?.project || projectData,inputs);
     checkOptimizationCancelled(signal);
     const captured = {context:{...(analysisRunRef.current?.context || failureContext()),checked_at:new Date().toISOString()},request:diagnosticClone(inputs),
       attempt:{scenario:inputs.scenario,mode:simulationMode,...attempt}};
@@ -354,7 +356,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           pvConfig:(targetScenario === 'pv' || targetScenario === 'pv_bess') ? {...pvConfig,latitude:projectData.meta.latitude,longitude:projectData.meta.longitude,reference_date:weatherDate} : null,
           bessConfig:(targetScenario === 'bess' || targetScenario === 'pv_bess') ? {...bessConfig,reference_date:weatherDate} : null});
       } else {
-        return {
+        return applyFlatRateInputs(projectData,{
           scenario: targetScenario,
           planning_horizon_hours: 24,
           solver_time_limit_seconds:localSettings.solver_time_limit_seconds,
@@ -379,7 +381,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             longitude: projectData.meta.longitude
           } : null,
           bess_config: (targetScenario === 'bess' || targetScenario === 'pv_bess') ? bessConfig : null
-        };
+        });
       }
     };
 
@@ -405,7 +407,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             run_metadata: {
               ...fleetRunMetadata(projectData),
               ...runAuditMetadata(analysisRunRef.current?.context,validationState?.diagnostic,logsRef.current),
-              market_price_data:projectData.meta.price_evidence,
+              market_price_data:priceEvidenceForRun(projectData),
               request_inputs:diagnosticClone(inputs),
               inputs: JSON.parse(JSON.stringify(inputsWithRealizedVisits(inputs, result))),
               timestamp: new Date().toISOString(),
@@ -447,7 +449,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           run_metadata: {
             ...fleetRunMetadata(projectData),
             ...runAuditMetadata(analysisRunRef.current?.context,validationState?.diagnostic,logsRef.current),
-              market_price_data:projectData.meta.price_evidence,
+              market_price_data:priceEvidenceForRun(projectData),
             request_inputs:diagnosticClone(inputs),
             inputs: JSON.parse(JSON.stringify(inputsWithRealizedVisits(inputs, result))),
             timestamp: new Date().toISOString(),
@@ -501,13 +503,13 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       const {dates,excluded_dates:excludedDates=[]}=await historicalCalendar(longTermConfig.startDate,longTermConfig.endDate,settings.time_resolution);
       if (excludedDates.length) addLog(`Daily Cyclic: skipping daylight-saving transition dates: ${excludedDates.map(day=>`${day.date} (${day.local_day_hours}h)`).join(', ')}. These dates are excluded from all totals.`);
       const selection=priceSelection(project);
-      addLog(`Selected market price source: ${selection.source}.`);
-      const priceReport=selection.source==='smard' ? await prepareHistoricalPrices(longTermConfig.startDate,longTermConfig.endDate,settings.time_resolution,
+      addLog(selection.flatRateEnabled ? 'Price model: user-defined constant flat rate.' : `Selected market price source: ${selection.source}.`);
+      const priceReport=selection.flatRateEnabled ? {selected_source:'flat_rate',source:'User-defined flat rate',complete_days:dates.length-excludedDates.length,required_days:dates.length-excludedDates.length,missing_days:0,external_requests:0,coverage:'complete'} : selection.source==='smard' ? await prepareHistoricalPrices(longTermConfig.startDate,longTermConfig.endDate,settings.time_resolution,
         {signal:runAbortRef.current?.signal,allowFallback:selection.allowFallback,onProgress:setPricePreparation}) : {selected_source:'awattar',source:'aWATTar Austria',license:'aWATTar terms; not verified as CC BY 4.0',complete_days:0,required_days:dates.length-excludedDates.length,missing_days:0,external_requests:null,coverage:'checked_per_day'};
-      if(selection.source==='smard') setPricePreparation({status:'completed',result:priceReport});
+      if(!selection.flatRateEnabled && selection.source==='smard') setPricePreparation({status:'completed',result:priceReport});
       else setPricePreparation(null);
       checkOptimizationCancelled(runAbortRef.current?.signal);
-      addLog(selection.source==='smard' ? `Price cache: ${priceReport.complete_days}/${priceReport.required_days} complete days; ${priceReport.missing_days} missing; ${priceReport.external_requests} external requests.` : 'aWATTar explicitly selected: prices are fetched and strictly checked per date. No automatic SMARD switch.');
+      addLog(selection.flatRateEnabled ? `Flat-rate-only run: ${selection.flatRateEurKwh} EUR/kWh before configured fees/taxes; no market prices requested.` : selection.source==='smard' ? `Price cache: ${priceReport.complete_days}/${priceReport.required_days} complete days; ${priceReport.missing_days} missing; ${priceReport.external_requests} external requests.` : 'aWATTar explicitly selected: prices are fetched and strictly checked per date. No automatic SMARD switch.');
       if(priceReport.missing_days) addLog('Partial evaluation: incomplete-price dates will remain excluded unless targeted gap preparation recovers them.');
       let capacity=1,capabilityReport=null;
       try {
@@ -527,9 +529,9 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         fetchPrices:async (date,{signal=runAbortRef.current?.signal,retry=false}={})=>{
           checkOptimizationCancelled(signal);
           try {
-            if(retry && selection.source==='smard') await prepareHistoricalPrices(date,date,settings.time_resolution,
+            if(retry && !selection.flatRateEnabled && selection.source==='smard') await prepareHistoricalPrices(date,date,settings.time_resolution,
               {signal,allowFallback:selection.allowFallback,onProgress:setPricePreparation});
-            const prices=selection.source==='smard' ? await historicalDayPrices(date,settings.time_resolution,signal,selection.priceWindowMinutes) : await getPricesForOptimization(date,24,settings.time_resolution,{...selection,signal});
+            const prices=selection.flatRateEnabled ? flatRateQuotes(date,24,settings.time_resolution,selection.flatRateEurKwh) : selection.source==='smard' ? await historicalDayPrices(date,settings.time_resolution,signal,selection.priceWindowMinutes) : await getPricesForOptimization(date,24,settings.time_resolution,{...selection,signal});
             checkOptimizationCancelled(signal);
             return prices;
           } catch(error) {
@@ -589,7 +591,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       // 1. Fetch Historical Context
       addLog('Fetching historical weather and price data...');
       const selection=priceSelection(projectData);
-      if(selection.source==='smard') await prepareHistoricalPrices(longTermConfig.startDate,longTermConfig.endDate,localSettings.time_resolution,
+      if(!selection.flatRateEnabled && selection.source==='smard') await prepareHistoricalPrices(longTermConfig.startDate,longTermConfig.endDate,localSettings.time_resolution,
         {signal:runAbortRef.current?.signal,allowFallback:selection.allowFallback,onProgress:setPricePreparation});
       const contextRes = await fetch(`${API_BASE}/data/historical-context`, {
         method: 'POST',
@@ -603,7 +605,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           pv_capacity_kw: (scenario === 'pv' || scenario === 'pv_bess') ? pvConfig.capacity_kw : 0,
           resolution_min: localSettings.time_resolution,
           price_source:selection.source,
-          price_window_minutes:selection.priceWindowMinutes
+          price_window_minutes:selection.priceWindowMinutes,
+          flat_rate_eur_kwh:selection.flatRateEnabled ? selection.flatRateEurKwh : null
         })
       });
 
@@ -660,6 +663,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       const baselineIssues = new Set();
       const chunkSocPolicies = [];
       const appendProfiles = (target, source) => Object.entries(source || {}).forEach(([key, values]) => { (target[key] ||= []).push(...values); });
+      const chunkPriceResults=[];
       let totalCost = 0;
       let totalBaselineCost = 0;
       let totalBasicOptimizedCost = 0;
@@ -852,6 +856,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           agg_diagnostics.push(dailyDiags);
         }
         
+        chunkPriceResults.push({total_cost_eur:res.total_cost_eur,price_assumption:res.price_assumption,flat_rate_comparison:res.flat_rate_comparison});
         totalCost += res.total_cost_eur;
         baselineComparable &&= res.baseline_feasible === true && Number.isFinite(res.baseline_cost_eur);
         basicComparable &&= Number.isFinite(res.basic_optimized_cost_eur);
@@ -871,6 +876,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
 
       // 4. Construct flat payload matching standard format
       const finalPayload = {
+        ...mergeFlatRateResults(chunkPriceResults),
         soc_policy: mergeSocPolicies(chunkSocPolicies),
         opportunity_charging_visits: aggVisits,
         additional_trip_energy_profiles: aggVisitEnergy,
@@ -924,7 +930,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             timestamp: new Date().toISOString(),
             scenario: scenario,
             is_long_term: true,
-            long_term_mode:'flexible',historical_prices_verified:contextData.price_evidence?.coverage==='complete',market_price_data:contextData.price_evidence,
+            long_term_mode:'flexible',historical_prices_verified:!selection.flatRateEnabled && contextData.price_evidence?.coverage==='complete',market_price_data:contextData.price_evidence,
             duration_days: totalDays,
             settings: { ...localSettings, longTermConfig },
             inputs: {
@@ -1004,7 +1010,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     const recordValidation = (result, request = null, origin = 'backend', transportError = null) => {
       setValidationState({ key, result, diagnostic:validationDiagnostic(context, result, request, origin, transportError) });
     };
-    const policyIssues = [...solverTimeLimitIssues(localSettings), ...socPolicyIssues(localSettings), ...endConditionIssues(localSettings, simulationMode), ...chargingCurveIssues(localSettings),
+    const policyIssues = [...flatRateIssues(projectData), ...solverTimeLimitIssues(localSettings), ...socPolicyIssues(localSettings), ...endConditionIssues(localSettings, simulationMode), ...chargingCurveIssues(localSettings),
       ...(simulationMode==='single' && projectData.buses.length && !marketPricesCurrent(projectData,projectData.meta.price_requested_date || projectData.meta.price_date || new Date().toISOString().slice(0,10),localSettings.planning_horizon,localSettings.time_resolution)
         ? [{type:'ERROR',category:'data',code:'PRICE_SOURCE_NOT_LOADED',message:'Load complete prices for the selected source, date, horizon and resolution under Market price source. Previously loaded prices cannot be silently relabelled or repeated.'}] : []),
       ...(simulationMode === 'daily_cyclic' ? dailyConfigurationIssues({...projectData,buses:busesToValidate},localSettings,scenario) : [])];
@@ -2112,7 +2118,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
               </div>
             )}
             
-            {simulationMode==='daily_cyclic' && priceSelection(projectData).source==='smard' && <section className="price-data-tools" aria-label="Historical price tools">
+            {simulationMode==='daily_cyclic' && !flatRateSettings(projectData).enabled && priceSelection(projectData).source==='smard' && <section className="price-data-tools" aria-label="Historical price tools">
               <div className="price-tools-heading"><strong>Historical price data</strong><span>SMARD · local cache</span></div>
               <p className="price-tools-intro">Check saved prices or load only the intervals missing for your selected dates.</p>
               <div className="price-tools-actions">
@@ -2235,7 +2241,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             </div>
           )}
           <div className="running-status-panels">
-          {simulationMode!=='single' && priceSelection(projectData).source==='smard' && <HistoricalPriceStatus state={pricePreparation} />}
+          {simulationMode!=='single' && !flatRateSettings(projectData).enabled && priceSelection(projectData).source==='smard' && <HistoricalPriceStatus state={pricePreparation} />}
           {simulationMode==='daily_cyclic'
             ? <DailyRunProgress statuses={dayStatuses} telemetry={dayLiveProgress} execution={dailyExecution} />
             : <OptimizationProgress state={liveProgress} />}

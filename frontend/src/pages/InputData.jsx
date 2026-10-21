@@ -1,3 +1,4 @@
+import {flatRateSettings} from '../utils/flatRate';
 import CustomSelect from '../components/CustomSelect';
 import React, { useState, useRef, useEffect } from 'react';
 import { Upload, Table as TableIcon, Plus, Save, AlertCircle, Loader2, FileSpreadsheet, Check, Zap, Download, Clock, TrendingUp, Info, Circle, Settings, Battery, MapPin, ArrowRight } from 'lucide-react';
@@ -1200,6 +1201,9 @@ const ConstraintsTab = ({ projectData, setProjectData, activeExcelData, availabl
 const PricingTab = ({ projectData, setProjectData, onBusyChange, onError }) => {
   const [selectedDate, setSelectedDate] = useState(projectData.meta.price_requested_date || projectData.meta.price_date || new Date().toISOString().split('T')[0]);
   const [priceData, setPriceData] = useState(projectData.meta.price_preview || null);
+  const flat=flatRateSettings(projectData);
+  const step=projectData.meta.time_resolution || 15;
+  const preview=flat.enabled ? (Number.isFinite(flat.eurKwh) ? Array.from({length:(projectData.meta.planning_horizon || 24)*60/step},(_,i)=>({price:flat.eurKwh*1000,time:`${String(Math.floor(i*step/60)%24).padStart(2,'0')}:${String(i*step%60).padStart(2,'0')}`})) : []) : priceData;
   const [isLoading, setIsLoading] = useState(false);
   
   const assumptions = projectData.meta.price_assumptions || {
@@ -1241,9 +1245,8 @@ const PricingTab = ({ projectData, setProjectData, onBusyChange, onError }) => {
 
   return (
     <div className="pricing-tab animate-in">
-      <div className="grid grid-cols-2 gap-6">
-        {/* Left Column: Configuration & Actions */}
-        <div className="space-y-6">
+      <div className="pricing-settings-grid">
+        {/* Source selection and tariff settings */}
           <div className="card shadow-sm p-6 overflow-hidden relative">
             <div className="absolute top-0 right-0 w-32 h-32 bg-primary/5 rounded-full -mr-16 -mt-16 blur-3xl"></div>
             
@@ -1297,14 +1300,15 @@ const PricingTab = ({ projectData, setProjectData, onBusyChange, onError }) => {
                   disabled={isLoading}
                 >
                   {isLoading ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
-                  Fetch selected source
+                  {flat.enabled ? 'Apply flat rate' : 'Fetch selected source'}
                 </button>
 
               </div>
-              <p className="text-sm text-muted">Preise werden beim Abruf automatisch übernommen. Ein neu gewähltes Datum wird auch bei „Continue to Settings“ synchronisiert. Preisaufschläge werden direkt gespeichert.</p>
+              <p className="text-sm text-muted">Fetched prices are saved automatically. Continue to Settings also synchronizes a newly selected date. Price assumptions are saved immediately.</p>
             </div>
           </div>
 
+        <div className="pricing-assumptions-stack">
           <div className="card shadow-sm p-6">
             <h3 className="card-title text-primary flex items-center gap-2 mb-6">
               <TrendingUp size={18} />
@@ -1422,30 +1426,29 @@ const PricingTab = ({ projectData, setProjectData, onBusyChange, onError }) => {
           </div>
         </div>
 
-        {/* Right Column: Visualization Preview */}
-        <div className="flex flex-col h-full">
-          <div className="card shadow-sm p-0 overflow-hidden flex-1 flex flex-col">
+      </div>
+
+      {/* Full-width preview with an independent chart height */}
+      <section className="card shadow-sm p-0 overflow-hidden pricing-preview" aria-label="Price preview">
             <div className="p-4 border-b bg-app/50 flex justify-between items-center">
               <h3 className="card-title text-primary mb-0">
                 <TrendingUp size={18} />
                 Market Data Preview
               </h3>
-              <span className="text-[10px] font-bold text-muted uppercase">EPEX SPOT Austria</span>
+              <span className="text-[10px] font-bold text-muted uppercase">{flat.enabled ? 'Fixed tariff' : 'EPEX SPOT Austria'}</span>
             </div>
 
-            <div className="p-6 flex-1 min-h-500">
-              <PriceChart data={priceData} assumptions={assumptions} />
+            <div className="pricing-preview-plot">
+              <PriceChart data={preview} assumptions={assumptions} />
             </div>
 
             <div className="p-4 bg-app/30 border-t">
               <p className="text-[10px] text-muted leading-relaxed flex items-start gap-2">
                 <Info size={14} className="shrink-0 mt-0.5" />
-                Die Vorschau zeigt die Marktpreise. Die Preiszeitreihe wird automatisch für die Zeitauflösung des Projekts übernommen.
+                {flat.enabled ? 'The preview shows the configured flat rate and effective price including fees and taxes.' : 'The preview shows spot and effective prices on the project time grid, using the selected price averaging window.'}
               </p>
             </div>
-          </div>
-        </div>
-      </div>
+      </section>
 
       {/* Removed Redundant Local Styles */}
     </div>

@@ -68,6 +68,7 @@ class HistoricalContextRequest(BaseModel):
     resolution_min: int = 15
     price_source: str = 'smard'
     price_window_minutes: int = 15
+    flat_rate_eur_kwh: float | None = None
 
 app.add_middleware(
     CORSMiddleware,
@@ -384,7 +385,7 @@ async def get_historical_context(req: HistoricalContextRequest):
         resolution_min = req.resolution_min
 
         # 1. Prices
-        price_evidence=await selected_market_prices(start_date_clean,horizon_hours,resolution_min,req.price_source,price_window_minutes=req.price_window_minutes)
+        price_evidence=await selected_market_prices(start_date_clean,horizon_hours,resolution_min,req.price_source,price_window_minutes=req.price_window_minutes,flat_rate_eur_kwh=req.flat_rate_eur_kwh)
         prices=price_evidence['prices']
         
         # 2. PV Yield

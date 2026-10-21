@@ -1,3 +1,4 @@
+import math
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Literal
 from pydantic import field_validator, model_validator
@@ -26,6 +27,12 @@ class ChargingSite(BaseModel):
     no_switch_windows: List[SwitchingWindow] = Field(default_factory=list)
     allow_connect_on_arrival: bool = True
     lock_charging_mode: Literal['automatic_balanced', 'optimized'] = 'automatic_balanced'
+
+    @field_validator('allow_connect_on_arrival',mode='before')
+    @classmethod
+    def arrivals_may_use_free_connectors(cls,value):
+        # Backwards-compatible input field: the old arrival ban no longer applies.
+        return True
 
 class OpportunityVisit(BaseModel):
     id: str
@@ -138,6 +145,10 @@ class OptimizationInputs(BaseModel):
     buses: List[BusUmlauf]
     electricity_prices: List[float] = Field(..., description="Effective Price per MWh (incl. markups) (p_t)")
     market_prices: List[float] = Field(default_factory=list, description="Original wholesale Market Price per MWh")
+    price_mode: Literal['market','flat_rate'] = 'market'
+    flat_rate_base_eur_kwh: Optional[float] = Field(None, ge=0, allow_inf_nan=False)
+    flat_rate_effective_eur_mwh: Optional[float] = Field(None, allow_inf_nan=False)
+    arrival_flat_rate_eur_mwh: Optional[float] = Field(None, allow_inf_nan=False)
     charger_capacity_kw: float = Field(..., description="Legacy single-depot charger limit; ignored when charging_sites are configured")
     grid_limit_kw: float = Field(..., description="Legacy single-depot grid connection limit; ignored when charging_sites are configured")
     initial_soc_fraction: float = Field(1.0, description="Default initial SoC fraction if not specified per bus")
@@ -157,6 +168,18 @@ class OptimizationInputs(BaseModel):
 
     @model_validator(mode='after')
     def valid_operating_soc_band(self):
+        if self.price_mode == 'flat_rate' and self.arrival_flat_rate_eur_mwh is not None:
+            raise ValueError('Additional flat-rate arrival comparison is available only for a market-price main analysis.')
+        if self.arrival_flat_rate_eur_mwh is not None and (self.flat_rate_base_eur_kwh is None or self.flat_rate_effective_eur_mwh is None or abs(self.arrival_flat_rate_eur_mwh-self.flat_rate_effective_eur_mwh)>1e-8):
+            raise ValueError('The arrival comparison requires the shared base and effective flat rate.')
+        if self.price_mode == 'flat_rate':
+            if self.flat_rate_base_eur_kwh is None or self.flat_rate_effective_eur_mwh is None:
+                raise ValueError('Flat-rate runs require a base and effective fixed price.')
+            expected=self.planning_horizon_hours*60/self.time_step_minutes
+            if len(self.electricity_prices)!=expected or any(abs(value-self.flat_rate_effective_eur_mwh)>1e-8 or not math.isfinite(value) for value in self.electricity_prices):
+                raise ValueError('Every solver period must use the declared effective flat rate.')
+            if len(self.market_prices)!=expected or any(abs(value-self.flat_rate_base_eur_kwh*1000)>1e-8 or not math.isfinite(value) for value in self.market_prices):
+                raise ValueError('Every solver period must record the declared base flat rate.')
         if (self.daily_boundary_seed or self.daily_connection_boundary) and not self.daily_cyclic:
             raise ValueError('Independent daily connection boundaries require Daily Cyclic.')
         if self.daily_boundary_seed and self.daily_connection_boundary:
@@ -202,6 +225,8 @@ class BusDiagnostic(BaseModel):
     diagnostic_reason: str
 
 class OptimizationResult(BaseModel):
+    price_assumption: Dict = Field(default_factory=dict)
+    flat_rate_comparison: Dict = Field(default_factory=dict)
     charging_curve: Dict = Field(default_factory=dict)
     end_condition: Dict = Field(default_factory=dict)
     soc_policy: Dict = Field(default_factory=dict)

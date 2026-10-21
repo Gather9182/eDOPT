@@ -21,9 +21,6 @@ def slot_is_blocked(site, minute, step):
     return any(is_switch_blocked(site, minute + offset) for offset in range(step))
 
 
-def allows_locked_arrival(site):
-    return site.lock_charging_mode == 'optimized' and site.allow_connect_on_arrival
-
 
 def validate_sites(inputs):
     if any(bus.opportunity_visits for bus in inputs.buses) and not inputs.charging_sites:
@@ -113,34 +110,20 @@ def add_site_constraints(prob, inputs, power, grid_import=None, energy_flows=Non
                     prev = connected[(bus.id,site.id,t-1)] if t else (int(bus.initial_connection_site == site.id) if bus.initial_connection_site is not None else None)
                     if prev is not None:
                         prob += y >= prev-(1-actual_presence)-actual_arrival
-                        prob += y <= prev+(actual_arrival if allows_locked_arrival(site) else 0)
-                    if site.lock_charging_mode == 'automatic_balanced':
-                        prob += y <= 1-actual_arrival
+                        prob += y <= prev+actual_arrival
                     continue
                 # Releases for timetable departures are always possible. A positive
                 # arrival event permits only initial connection, never disconnection
                 # of another vehicle that is still parked.
-                if t > 0 and present[t] and present[t-1]:
-                    prev = connected[(bus.id, site.id, t-1)]
-                    if arrivals[t]:
-                        if not allows_locked_arrival(site):
-                            prob += y == 0
-                    else:
-                        prob += y == prev
-                elif t > 0 and present[t] and not allows_locked_arrival(site):
-                    prob += y == 0
-                elif t == 0 and bus.initial_connection_site is not None and present[t]:
-                    if not arrivals[t]:
-                        prob += y == int(bus.initial_connection_site == site.id)
-                    elif not allows_locked_arrival(site):
-                        prob += y == 0
-                if t == 0 and arrivals[t] and site.lock_charging_mode == 'automatic_balanced':
-                    prob += y == 0
+                if t > 0 and present[t] and present[t-1] and not arrivals[t]:
+                    prob += y == connected[(bus.id, site.id, t-1)]
+                elif t == 0 and bus.initial_connection_site is not None and present[t] and not arrivals[t]:
+                    prob += y == int(bus.initial_connection_site == site.id)
             # Preserve overnight occupation across the repeated-day boundary.
             if dynamic and inputs.cyclic_connections and bus.initial_connection_site is None and n*inputs.time_step_minutes % 1440 == 0 and is_switch_blocked(site, inputs.horizon_start_minute):
                 y, prev = connected[(bus.id,site.id,0)], connected[(bus.id,site.id,n-1)]
                 prob += y >= prev-(1-dynamic_presence[0])-dynamic_arrivals[0]
-                prob += y <= prev+(dynamic_arrivals[0] if allows_locked_arrival(site) else 0)
+                prob += y <= prev+dynamic_arrivals[0]
             elif (inputs.cyclic_connections and bus.initial_connection_site is None and n * inputs.time_step_minutes % 1440 == 0
                     and present[0] and present[-1] and not arrivals[0]
                     and is_switch_blocked(site, inputs.horizon_start_minute)):
@@ -206,16 +189,26 @@ def simulate_site_baseline(inputs, minimum_soc_deviation=None):
         if inputs.operating_min_soc_mode == 'hard' and soc[bus.id] < minimum_energy(inputs, bus) - .001:
             issues.append(f'Bus {bus.id}: arrival reference violates the operating minimum SoC at the initial state.')
     first_connections = None
+    sites_by_id = {site.id:site for site in inputs.charging_sites}
     for t in range(n):
+        # Release all scheduled departures before assigning arriving buses. This
+        # makes a connector freed at the same boundary available irrespective of bus/site order.
+        for bus in inputs.buses:
+            site = sites_by_id.get(connections[bus.id])
+            if site is None:
+                continue
+            presence = bus.site_presence.get(site.id,bus.site_availability.get(site.id,[0]*n))
+            arrivals = bus.site_arrivals.get(site.id,[int(presence[k] and not presence[k-1]) for k in range(n)])
+            blocked = slot_is_blocked(site,inputs.horizon_start_minute+t*inputs.time_step_minutes,inputs.time_step_minutes)
+            if not presence[t] or arrivals[t] or (not blocked and soc[bus.id]>=preferred_maximum(inputs,bus)-.01):
+                connections[bus.id]=''
         for site in inputs.charging_sites:
             blocked = slot_is_blocked(site, inputs.horizon_start_minute + t * inputs.time_step_minutes, inputs.time_step_minutes)
             for bus in inputs.buses:
                 available = bus.site_availability.get(site.id, [0] * n)
                 presence = bus.site_presence.get(site.id, available)
                 arrivals = bus.site_arrivals.get(site.id, [int(presence[k] and not presence[k-1]) for k in range(n)])
-                if connections[bus.id] == site.id and (not presence[t] or arrivals[t] or (not blocked and soc[bus.id] >= preferred_maximum(inputs, bus) - .01)):
-                    connections[bus.id] = ''
-                can_connect = not blocked or (allows_locked_arrival(site) and arrivals[t])
+                can_connect = not blocked or arrivals[t]
                 # At the first horizon boundary, initialise the unknown parked fleet.
                 can_connect |= t == 0 and bus.initial_connection_site is None and not arrivals[t]
                 occupied = sum(s == site.id for s in connections.values())

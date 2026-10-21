@@ -1,3 +1,5 @@
+import RouteSummaryExportButton from '../components/RouteSummaryExportButton';
+import FlatRateResults from '../components/FlatRateResults';
 import React, { useState, useEffect, useMemo } from 'react';
 import { arrivalComparison } from '../utils/arrivalComparison';
 import SocPolicyResults from '../components/SocPolicyResults';
@@ -2498,164 +2500,6 @@ const Results = () => {
     );
   };
 
-  const downloadCSV = (content, filename) => {
-    const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const handleExport = () => {
-    if (!results) return;
-
-    const getFormattedBaseFilename = (suffix, ext) => {
-      let scenario = results.scenario || 'baseline';
-      if (scenario === 'depot') scenario = 'baseline';
-      if (scenario === 'pv_bess') scenario = 'pvbess';
-      
-      const term = results.is_long_term ? 'Longterm' : 'Shortterm';
-      
-      let dateStr = results.run_metadata?.inputs?.start_date || 
-                    results.run_metadata?.settings?.longTermConfig?.startDate || 
-                    results.run_metadata?.inputs?.pv_config?.reference_date ||
-                    results.run_metadata?.inputs?.reference_date ||
-                    results.run_metadata?.timestamp;
-                    
-      if (!dateStr) {
-        dateStr = new Date().toISOString();
-      }
-      
-      let formattedDate = '010126';
-      try {
-        const dateObj = new Date(dateStr);
-        if (!isNaN(dateObj.getTime())) {
-          const day = String(dateObj.getDate()).padStart(2, '0');
-          const month = String(dateObj.getMonth() + 1).padStart(2, '0');
-          const year = String(dateObj.getFullYear()).slice(-2);
-          formattedDate = `${day}${month}${year}`;
-        }
-      } catch (e) {
-        console.error("Error formatting date for filename:", e);
-      }
-      
-      return `eDOPT_${scenario}-${term}_${formattedDate}_${suffix}.${ext}`;
-    };
-
-    const runtimeMeta = results.run_metadata || {};
-    const metaHeader = [
-      `# Antigravity eDOPT - Optimization Export`,
-      `# Run Timestamp: ${runtimeMeta.timestamp || new Date().toISOString()}`,
-      `# Depot Capacity: ${runtimeMeta.inputs?.grid_limit_kw || 'N/A'} kW`,
-      `# Total Cost: EUR ${results.total_cost_eur}`,
-      `# -------------------------------------------`,
-      ``
-    ].join('\n');
-
-    // 1. Aggregated Load CSV (Audit version)
-    const summaryHeaders = ['Time', 'Grid Power (kW)', 'Market Price (Wholesale, EUR/MWh)', 'Effective Price (incl. Markups, EUR/MWh)', 'Grid Energy / Period (kWh)', 'Cost / Period (EUR)'];
-    const summaryRows = chartData.map(d => [
-        d.time, 
-        (d.load || 0).toFixed(2), 
-        (d.marketPrice || 0).toFixed(2), 
-        (d.price || 0).toFixed(2),
-        ((d.load || 0) * dt).toFixed(3),
-        ((d.load || 0) * (d.price || 0) * dt / 1000).toFixed(4)
-    ]);
-    const summaryCSV = metaHeader + [summaryHeaders.join(','), ...summaryRows.map(r => r.join(','))].join('\n');
-    downloadCSV(summaryCSV, getFormattedBaseFilename('depot_summary_audit', 'csv'));
-
-    // 2. Detailed Schedules Pivot
-    if (results.schedules) {
-        const busIds = Object.keys(results.schedules);
-        const detailHeaders = ['Time', ...busIds];
-        const detailRows = Array.from({ length: results.aggregated_load_profile.length }, (_, i) => {
-          const timeStr = `${Math.floor(i * timeStepMin / 60)}:${String(i * timeStepMin % 60).padStart(2, '0')}`;
-          const busPowers = busIds.map(id => results.schedules[id][i] || 0);
-          return [timeStr, ...busPowers];
-        });
-        const detailCSV = metaHeader + [detailHeaders.join(','), ...detailRows.map(r => r.join(','))].join('\n');
-        
-        setTimeout(() => {
-            downloadCSV(detailCSV, getFormattedBaseFilename('detailed_schedules', 'csv'));
-        }, 500);
-    }
-
-    // 3. Fleet Health Diagnostics
-    if (results.bus_diagnostics) {
-        const diagHeaders = [
-            'Umlauf ID', 'Vehicle Type', 'Capacity (kWh)', 'Distance (km)', 
-            'TARGET Initial SoC (kWh)', 'ACTUAL Initial SoC (kWh)',
-            'TARGET Reserve (kWh)', 'ACTUAL Min SoC (kWh)', 
-            'Final SoC (kWh)', 'Next-Day Buffer (kWh)',
-            'Total Demand (kWh)', 'Total Charged (kWh)', 'Was Charged', 
-            'Health Status', 'Diagnostic Reason'
-        ];
-        const diagRows = results.bus_diagnostics.map(d => [
-            d.id, 
-            `"${d.vehicle_type || ''}"`,
-            d.capacity_kwh, 
-            d.total_distance_km || 0,
-            d.target_initial_soc_kwh || 0,
-            d.initial_soc_kwh, 
-            d.target_min_final_soc_kwh || 0,
-            d.min_soc_reached_kwh, 
-            d.final_soc_kwh, 
-            d.next_day_required_energy_kwh || 0,
-            d.total_trip_energy_kwh, 
-            d.total_charged_energy_kwh,
-            d.is_charged ? 'YES' : 'NO',
-            d.status_flag,
-            `"${d.diagnostic_reason || ''}"` // Wrap in quotes for safety with commas
-        ]);
-        const diagCSV = metaHeader + [diagHeaders.join(','), ...diagRows.map(r => r.join(','))].join('\n');
-        
-        setTimeout(() => {
-            downloadCSV(diagCSV, getFormattedBaseFilename('fleet_diagnostics', 'csv'));
-        }, 1000);
-    }
-
-    // 4. Full Route Audit (Trip-level detail)
-    const allBusInputs = results.run_metadata?.inputs?.buses || [];
-    if (allBusInputs.length > 0) {
-        const auditHeaders = [
-            'Umlauf ID', 'Fahrtnummer', 'Typ', 'Fahrtart', 'Start', 'End', 
-            'Von', 'Von (Desc)', 'Nach', 'Nach (Desc)', 'Dist (m)', 'Energy (kWh)', 'Is Technical?'
-        ];
-        const auditRows = [];
-        allBusInputs.forEach(bus => {
-            if (bus.trips) {
-                bus.trips.forEach(t => {
-                    auditRows.push([
-                        bus.id,
-                        `"${t.fahrtnummer || ''}"`,
-                        t.typ || '',
-                        `"${t.fahrtart || ''}"`,
-                        t.start || '',
-                        t.end || '',
-                        t.von || '',
-                        `"${t.von_desc || ''}"`,
-                        t.nach || '',
-                        `"${t.nach_desc || ''}"`,
-                        t.dist_m || 0,
-                        t.energy_kwh || 0,
-                        t.is_technical ? 'YES' : 'NO'
-                    ]);
-                });
-            }
-        });
-
-        if (auditRows.length > 0) {
-            const auditCSV = metaHeader + [auditHeaders.join(','), ...auditRows.map(r => r.join(','))].join('\n');
-            setTimeout(() => {
-                downloadCSV(auditCSV, getFormattedBaseFilename('full_route_audit', 'csv'));
-            }, 1500);
-        }
-    }
-  };
-
   const handleSaveToComparison = async () => {
     if (!results) return;
     setSaveStatus('saving');
@@ -2732,8 +2576,13 @@ const Results = () => {
         )}
       </div>
       
+      {results.is_long_term && !isDrillDown && <div className="flex gap-2 mb-4" style={{alignItems:'flex-start',flexWrap:'wrap'}}>
+        <RouteSummaryExportButton results={results} />
+        <button className="btn btn-primary" disabled title="PDF reporting is currently disabled">Report PDF</button>
+      </div>}
       <ExcludedRoutesNotice ids={results.run_metadata?.excluded_bus_ids} reasons={results.run_metadata?.excluded_bus_reasons} />
       <DailyCyclicSummary results={results} />
+      <FlatRateResults results={results} />
       <ChargingSiteResults results={results} day={results.is_long_term && isDrillDown ? selectedDay : null} />
       <SocPolicyResults policy={results.soc_policy} />
       <EndConditionResults condition={results.end_condition} />
@@ -3613,9 +3462,7 @@ const Results = () => {
       {isDrillDown && (
       <div className="flex justify-between items-center mb-6">
         <div className="flex gap-2">
-          <button className="btn btn-outline" onClick={handleExport}>
-            <Download size={18} /> Export Data
-          </button>
+          <RouteSummaryExportButton results={results} />
           <button 
             className={`btn ${saveStatus === 'saved' ? 'btn-primary' : 'btn-outline'} transition-all`} 
             onClick={handleSaveToComparison}
@@ -3626,7 +3473,7 @@ const Results = () => {
              <GitCompare size={18} />} 
             {saveStatus === 'saved' ? 'Saved to Compare' : 'Save for Comparison'}
           </button>
-          <button className="btn btn-primary" onClick={() => window.print()}>Report PDF</button>
+          <button className="btn btn-primary" disabled title="PDF reporting is currently disabled">Report PDF</button>
         </div>
       </div>
       )}
@@ -5282,7 +5129,7 @@ const ResultsSkeleton = ({ results, selectedDay, auditActive }) => {
           {/* Action Buttons */}
           <div className="flex justify-between items-center mb-6">
             <div className="flex gap-2">
-              <button className="btn btn-outline" disabled style={{ opacity: 0.5 }}><Download size={18} /> Export Data</button>
+              <button className="btn btn-outline" disabled style={{ opacity: 0.5 }}><Download size={18} /> Route Summary CSV</button>
               <button className="btn btn-outline" disabled style={{ opacity: 0.5 }}><GitCompare size={18} /> Save for Comparison</button>
               <button className="btn btn-primary" disabled style={{ opacity: 0.5 }}>Report PDF</button>
             </div>

@@ -37,11 +37,30 @@ class AutomaticChargingTests(unittest.TestCase):
         self.assertEqual(result.schedules['a'][1:],[0]*3)
         self.assertEqual(balanced_allocation([4,40],40),[4,36])
 
-    def test_arrival_cannot_connect_even_if_legacy_exception_is_true(self):
-        data=automatic([bus('a',availability=[0,1,1,1],site_availability={'D':[0,1,1,1]},
-                             site_presence={'D':[0,1,1,1]},site_arrivals={'D':[0,1,0,0]})])
-        self.assertTrue(data.charging_sites[0].allow_connect_on_arrival)
-        with self.assertRaisesRegex(RuntimeError,'Infeasible'): self.solve(data)
+    def test_late_arrival_connects_and_retains_socket_after_charging_stops(self):
+        for extended in (False,True):
+            data=automatic([bus('a',availability=[0,1,1,1],site_availability={'D':[0,1,1,1]},
+                                 site_presence={'D':[0,1,1,1]},site_arrivals={'D':[0,1,0,0]})])
+            if extended:data.scenario='pv';data.energy_site_id='D'
+            result=self.solve(data,extended)
+            self.assertEqual(result.connection_schedules['a'],['','D','D','D'])
+            self.assertEqual(result.schedules['a'],[0,40,40,0])
+            load,issues=simulate_site_baseline(data)
+            self.assertEqual(list(load),[0,40,40,0]);self.assertEqual(issues,[])
+
+    def test_arrival_cannot_displace_full_parked_bus_and_departures_free_sockets_first(self):
+        late=bus('late',availability=[0,0,1,1],site_availability={'D':[0,0,1,1]},
+                 site_presence={'D':[0,0,1,1]},site_arrivals={'D':[0,0,1,0]})
+        parked=bus('parked',initial_soc_kwh=20,initial_connection_site='D')
+        data=automatic([late,parked]);data.charging_sites[0].num_chargers=1
+        with self.assertRaisesRegex(RuntimeError,'Infeasible'):self.solve(data)
+        departing=bus('departing',availability=[1,1,0,0],site_availability={'D':[1,1,0,0]},
+                      site_presence={'D':[1,1,0,0]},initial_connection_site='D')
+        data=automatic([late,departing]);data.charging_sites[0].num_chargers=1
+        result=self.solve(data)
+        self.assertEqual(result.connection_schedules['late'],['','','D','D'])
+        load,issues=simulate_site_baseline(data)
+        self.assertEqual(list(load),[40]*4);self.assertEqual(issues,[])
 
     def test_integrated_curve_caps_are_respected_and_freed_capacity_is_used(self):
         data=automatic([bus('a',max_battery_capacity_kwh=100,initial_soc_kwh=88,min_final_soc_kwh=0,initial_connection_site='D'),
@@ -87,13 +106,16 @@ class AutomaticChargingTests(unittest.TestCase):
         result=self.solve(data)
         self.assertEqual(result.connection_schedules['a'],['D','D','',''])
 
-    def test_optional_visit_may_enter_before_lock_but_not_during_lock(self):
+    def test_optional_visit_may_arrive_during_a_lock(self):
         from test_opportunity_charging import data as visit_inputs,visiting_bus
-        location=site(lock_charging_mode='automatic_balanced',no_switch_windows=[{'start':'00:30','end':'01:00'}])
+        location=site(lock_charging_mode='automatic_balanced',no_switch_windows=[{'start':'00:00','end':'01:00'}])
         data=visit_inputs([visiting_bus()],[location],charging_curve={'enabled':True})
         result=self.solve(data)
         self.assertEqual(len(result.opportunity_charging_visits),1)
-        self.assertLess(result.opportunity_charging_visits[0]['charger_arrival_min'],30)
-        data.charging_sites[0].no_switch_windows[0].start='00:00'
-        with self.assertRaisesRegex(RuntimeError,'Infeasible'): self.solve(data)
-
+        visit=result.opportunity_charging_visits[0]
+        self.assertGreater(visit['charger_arrival_min'],0)
+        self.assertLess(visit['charger_arrival_min'],60)
+        self.assertGreaterEqual(visit['return_departure_min'],60)
+        self.assertLess(visit['charger_arrival_min'],visit['return_departure_min'])
+        for t in range(int(visit['charger_arrival_min']/15),int(visit['return_departure_min']/15)):
+            self.assertEqual(result.connection_schedules['a'][t],location['id'])

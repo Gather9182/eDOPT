@@ -1,3 +1,4 @@
+import {mergeFlatRateResults} from './flatRate.js';
 import {buildSolverInputs,effectivePrices} from './solverInputs.js';
 import {mergeSocPolicies} from './socPolicy.js';
 import {dailyBoundaryEligibility,seedConnectionBoundary,dailyPhysicalKey} from './dailyBoundary.js';
@@ -316,7 +317,7 @@ export function aggregateDailyRun(run) {
   const good=run.records.filter(row=>row.status==='completed').sort((a,b)=>a.day_index-b.day_index);
   if (!good.length) return null;
   const results=good.map(row=>row.result),first=results[0];
-  const payload={scenario:'baseline',is_long_term:true,total_days:good.length,requested_days:run.dates.length,run_status:run.status,
+  const payload={...mergeFlatRateResults(results),scenario:'baseline',is_long_term:true,total_days:good.length,requested_days:run.dates.length,run_status:run.status,
     long_term_mode:'daily_cyclic',timetable_scope:'The same configured daily timetable is repeated on every date. No weekend/holiday timetable or global multi-day optimum.',
     daily_execution:run.execution,completed_dates:good.map(row=>row.date),completed_day_indices:good.map(row=>row.day_index),
     dst_policy:'skip',skipped_dates:run.records.filter(row=>row.status==='skipped').map(row=>({date:row.date,...row.exclusion})),

@@ -1,3 +1,5 @@
+import {effectivePrices} from './priceAssumptions.js';
+import {applyFlatRateInputs} from './flatRate.js';
 import {chargingInputs,locationProfilesForHorizon} from './charging.js';
 import {socPolicyInputs} from './socPolicy.js';
 
@@ -9,15 +11,7 @@ export function solverTimeLimitIssues(settings) {
     message:'Solver time limit must be a whole number between 1 and 86400 seconds.'}];
 }
 
-export function effectivePrices(market,assumptions) {
-  const config = assumptions || {supplier_markup:10,variable_network_charge:15,other_variable_levies:0,electricity_tax:8.2,use_vat:false,pricing_mode:'effective'};
-  if (!market.every(Number.isFinite)) throw new Error('Price series contains missing or invalid values.');
-  if (config.pricing_mode !== 'effective') return [...market];
-  const fees = ['supplier_markup','variable_network_charge','other_variable_levies','electricity_tax'].reduce((sum,key) => sum+Number(config[key] ?? 0),0);
-  const factor = config.use_vat ? 1+Number(config.vat_rate ?? .2) : 1;
-  if (!Number.isFinite(fees) || !Number.isFinite(factor) || factor < 0) throw new Error('Invalid price assumptions.');
-  return market.map(price => (price+fees)*factor);
-}
+export {effectivePrices} from './priceAssumptions.js';
 
 export function buildSolverInputs(project,settings,{buses=project.buses || [],scenario='baseline',hours=settings.planning_horizon,
   marketPrices=project.pricing || [],prices=effectivePrices(marketPrices,project.meta?.price_assumptions),
@@ -29,7 +23,7 @@ export function buildSolverInputs(project,settings,{buses=project.buses || [],sc
   if (!Number.isInteger(periods) || periods<=0) throw new Error('Horizon must contain a whole number of time steps.');
   const initialFraction=project.meta?.initial_soc_fraction;
   const reserveFraction=project.meta?.min_final_soc_fraction;
-  return {scenario,...chargingInputs(project),...socPolicyInputs(settings),
+  return applyFlatRateInputs(project,{scenario,...chargingInputs(project),...socPolicyInputs(settings),
     solver_time_limit_seconds:solverLimit,
     planning_horizon_hours:hours,time_step_minutes:settings.time_resolution,horizon_start_minute:horizonStart,
     cyclic_connections:cyclicConnections,...(daily ? {daily_cyclic:true,use_cyclic_soc:true} : {}),
@@ -46,5 +40,5 @@ export function buildSolverInputs(project,settings,{buses=project.buses || [],sc
     }),
     electricity_prices:repeatProfile(prices,periods),market_prices:repeatProfile(marketPrices,periods),
     charger_capacity_kw:settings.charger_capacity_kw,grid_limit_kw:settings.grid_limit_kw,num_chargers:settings.num_chargers ?? 50,
-    initial_soc_fraction:initialFraction ?? 1,min_final_soc_fraction:reserveFraction ?? .2,pv_config:pvConfig,bess_config:bessConfig};
+    initial_soc_fraction:initialFraction ?? 1,min_final_soc_fraction:reserveFraction ?? .2,pv_config:pvConfig,bess_config:bessConfig});
 }

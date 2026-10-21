@@ -24,13 +24,13 @@ test('legacy projects need no location migration; enabled empty configurations r
   assert.equal(chargingInputs({charging:{enabled:true,sites:[]}}).use_charging_sites,true);
 });
 
-test('automatic locks prohibit new connections in exact requests and preserve an explicit optimized mode', () => {
-  const sites=[{id:'A',allow_connect_on_arrival:true},{id:'B',lock_charging_mode:'optimized',allow_connect_on_arrival:true}];
+test('locked arrivals may use free connectors in both modes, including legacy configurations', () => {
+  const sites=[{id:'A',allow_connect_on_arrival:false},{id:'B',lock_charging_mode:'optimized',allow_connect_on_arrival:true}];
   const request=chargingInputs({charging:{enabled:true,sites}});
   assert.equal(request.charging_sites[0].lock_charging_mode,'automatic_balanced');
-  assert.equal(request.charging_sites[0].allow_connect_on_arrival,false);
+  assert.equal(request.charging_sites[0].allow_connect_on_arrival,true);
   assert.equal(request.charging_sites[1].allow_connect_on_arrival,true);
-  assert.equal(sites[0].allow_connect_on_arrival,true);
+  assert.equal(sites[0].allow_connect_on_arrival,false);
 });
 
 const suggestions = [{id:'A',name:'Depot A',nodes:['A_A','A_E']},{id:'B',name:'Depot B',nodes:['B_A','B_E']}];

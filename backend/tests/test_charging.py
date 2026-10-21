@@ -89,11 +89,12 @@ class PhysicalChargingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Infeasible'):
             self.solve(data)
 
-    def test_arrival_connection_can_be_disabled(self):
+    def test_legacy_arrival_ban_is_normalized_to_the_new_rule(self):
         data = inputs([bus('b', availability=[0,0,1,1], site_availability={'D':[0,0,1,1]}, site_presence={'D':[0,0,1,1]}, site_arrivals={'D':[0,0,1,0]})],
                       [site(no_switch_windows=[dict(start='00:00', end='00:00')], allow_connect_on_arrival=False)])
-        with self.assertRaisesRegex(RuntimeError, 'Infeasible'):
-            self.solve(data)
+        self.assertTrue(data.charging_sites[0].allow_connect_on_arrival)
+        result=self.solve(data)
+        self.assertEqual(result.connection_schedules['b'],['','','D','D'])
 
     def test_separate_sites_have_separate_connectors_and_limits(self):
         data = inputs([bus('a','A'),bus('b','B')], [site('A'),site('B')])
@@ -228,7 +229,7 @@ class PhysicalChargingTests(unittest.TestCase):
             self.solve(data)
 
     def test_export_preserves_connections_and_site_configuration(self):
-        data=inputs([bus('a',initial_connection_site='D')],[site(no_switch_windows=[dict(start='00:00',end='00:00')])])
+        data=inputs([bus('a',initial_connection_site='D')],[site(lock_charging_mode='automatic_balanced',no_switch_windows=[dict(start='00:00',end='00:00')])])
         result=self.solve(data).model_dump()
         result['run_metadata']={'inputs':data.model_dump()}
         stream=ExcelExporter.generate_excel(result)
@@ -238,6 +239,7 @@ class PhysicalChargingTests(unittest.TestCase):
         self.assertIn('Bus Connections',sheets.sheet_names)
         occupancy=sheets.parse('Charging Locations',header=2)
         self.assertEqual(occupancy['Occupied connectors'].tolist(),[1]*4)
+        self.assertTrue(sheets.parse('Location Settings',header=2)['Connect on arrival'].iloc[0])
 
 
 def workbook(rows, sheet='Mo-Do Schule'):

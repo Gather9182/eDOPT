@@ -1,3 +1,4 @@
+import {flatRateQuotes} from '../utils/flatRate.js';
 import axios from 'axios';
 import {optimizationJob} from '../utils/optimizationProgress';
 
@@ -79,7 +80,8 @@ export const fetchAWattarPrices = async (date) => {
   return response.data;
 };
 
-export const getPricesForOptimization = async (date, horizon, resolution,{source='smard',allowFallback=false,priceWindowMinutes=15,signal,onProgress}={}) => {
+export const getPricesForOptimization = async (date, horizon, resolution,{source='smard',allowFallback=false,priceWindowMinutes=15,flatRateEnabled=false,flatRateEurKwh=null,signal,onProgress}={}) => {
+  if(flatRateEnabled) return {...flatRateQuotes(date,horizon,resolution,flatRateEurKwh),request_selection:{source,allowFallback,priceWindowMinutes}};
   if(source==='smard') {
     const last=new Date(`${date}T00:00:00Z`);last.setUTCDate(last.getUTCDate()+Math.ceil(horizon/24)-1);
     await prepareHistoricalPrices(date,last.toISOString().slice(0,10),resolution,{signal,onProgress,allowFallback});

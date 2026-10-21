@@ -74,6 +74,11 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
     {name:'run/logs.json',data:json({solver:results.solver_logs || [],interface:metadata.interface_logs || []})},
     {name:'environment_at_export.json',data:json(environment)},
   ];
+  if (results.price_assumption?.mode==='flat_rate' || results.flat_rate_comparison?.enabled) {
+    files.push({name:'run/flat_rate.json',data:json({price_assumption:results.price_assumption,comparison:results.flat_rate_comparison})});
+    if (results.flat_rate_comparison?.enabled) files.push({name:'tables/flat_rate_comparison.csv',data:objectCsv([{
+      ...results.flat_rate_comparison,main_analysis_cost_eur:results.total_cost_eur,evaluated_days:results.total_days ?? null}])});
+  }
   if (results.long_term_mode === 'daily_cyclic') {
     files.push({name:'run/days/price_preparation.json',data:json(results.historical_price_preparation || null)});
     files.push({name:'run/days/status.json',data:json({status:results.run_status,scope:results.timetable_scope,execution:results.daily_execution,dst_policy:results.dst_policy,skipped_dates:results.skipped_dates || [],completed_dates:results.completed_dates,completed_day_indices:results.completed_day_indices,days:results.day_records,failed_attempts:results.failed_attempts || []})});

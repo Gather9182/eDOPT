@@ -10,7 +10,7 @@ export default function ChargingSitesEditor({ projectData, setProjectData, nodes
   const create = suggestion => ({
     id: suggestion?.id || `site_${Date.now()}`, name: suggestion?.name || 'New charging location', nodes: suggestion?.nodes || [],
     num_chargers: 1, charger_power_kw: 150, charger_capacity_kw: 150, grid_limit_kw: 150,
-    no_switch_windows: [], allow_connect_on_arrival: false, lock_charging_mode:'automatic_balanced',
+    no_switch_windows: [], allow_connect_on_arrival: true, lock_charging_mode:'automatic_balanced',
   });
   const numberFields = [['num_chargers', 'Ladepunkte'], ['charger_power_kw', 'kW je Ladepunkt'], ['charger_capacity_kw', 'Ladeleistung gesamt (kW)'], ['grid_limit_kw', 'Netzanschluss (kW)']];
   const selectedAE = selectedDepotNodes.filter(node => suggestions.some(site => site.nodes.includes(node)));
@@ -39,19 +39,18 @@ export default function ChargingSitesEditor({ projectData, setProjectData, nodes
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
           {numberFields.map(([key, label]) => <label key={key}>{label}<input aria-label={`${label} ${site.name}`} className="form-input w-full" type="number" min="0" step={key === 'num_chargers' ? '1' : '0.1'} value={site[key]} onChange={e => edit(site.id, { [key]: Number(e.target.value) })} /></label>)}
         </div>
-        <p className="text-sm text-muted mt-3 mb-2">Connected buses keep their connectors during a lock. Scheduled departures remain possible. Identical start and end times lock the whole day.</p>
-        <label className="block mb-3">Charging during locked periods<CustomSelect className="form-input w-full" value={site.lock_charging_mode || 'automatic_balanced'} onChange={e => edit(site.id,{lock_charging_mode:e.target.value,...(e.target.value === 'automatic_balanced' ? {allow_connect_on_arrival:false} : {})})}>
+        <p className="text-sm text-muted mt-3 mb-2">During a lock, an arriving bus may connect to a free charging point. Its connector remains occupied until the lock ends or the bus departs on a scheduled trip, even after charging stops. Parked buses cannot swap connectors. Identical start and end times lock the whole day.</p>
+        <label className="block mb-3">Charging during locked periods<CustomSelect className="form-input w-full" value={site.lock_charging_mode || 'automatic_balanced'} onChange={e => edit(site.id,{lock_charging_mode:e.target.value,allow_connect_on_arrival:true})}>
           <option value="automatic_balanced">Automatic — maximum available power, balanced shares</option>
           <option value="optimized">Optimized — charging power may follow electricity prices</option>
         </CustomSelect></label>
-        {(site.lock_charging_mode || 'automatic_balanced') === 'automatic_balanced' && <p className="text-sm text-muted mb-3">No new connections or switching during locks. Available power is shared equally among chargeable connected buses, with spare capacity redistributed when a bus reaches a limit. The charging target is the operating maximum SoC, or 100% if disabled. Soft maximum SoC may be exceeded under the existing minimum-deviation policy when necessary. Available PV and storage supply buses before storage charging.</p>}
+        {(site.lock_charging_mode || 'automatic_balanced') === 'automatic_balanced' && <p className="text-sm text-muted mb-3">Arriving buses may join at free charging points; existing connections cannot be manually released or reassigned during locks. Available power is shared equally among chargeable connected buses, with spare capacity redistributed when a bus reaches a limit. The charging target is the operating maximum SoC, or 100% if disabled. Soft maximum SoC may be exceeded under the existing minimum-deviation policy when necessary. Available PV and storage supply buses before storage charging.</p>}
         {(site.no_switch_windows || []).map((window, i) => <div key={i} className="time-window-row mb-2">
           <label>Von <input className="form-input time-window-input" aria-label={`Sperre von ${site.name} ${i+1}`} type="time" value={window.start} onChange={e => edit(site.id, { no_switch_windows: site.no_switch_windows.map((w, j) => j === i ? { ...w, start: e.target.value } : w) })} /></label>
           <label>Bis <input className="form-input time-window-input" aria-label={`Sperre bis ${site.name} ${i+1}`} type="time" value={window.end} onChange={e => edit(site.id, { no_switch_windows: site.no_switch_windows.map((w, j) => j === i ? { ...w, end: e.target.value } : w) })} /></label>
           <button className="btn btn-outline" onClick={() => edit(site.id, { no_switch_windows: site.no_switch_windows.filter((_, j) => j !== i) })}>Löschen</button>
         </div>)}
         <button className="btn btn-outline mb-3" onClick={() => edit(site.id, { no_switch_windows: [...(site.no_switch_windows || []), { start: '22:00', end: '05:00' }] })}>Sperrzeit hinzufügen</button>
-        {(site.lock_charging_mode || 'automatic_balanced') === 'optimized' && <label className="flex items-center gap-2"><input type="checkbox" checked={site.allow_connect_on_arrival ?? true} onChange={e => edit(site.id, { allow_connect_on_arrival: e.target.checked })} /> Allow a new connection on arrival during a lock (exception)</label>}
       </div>)}
       <label>Standort für PV und stationären Speicher<CustomSelect className="form-input w-full" value={config.energy_site_id || ''} onChange={e => update({ energy_site_id: e.target.value })}>
         <option value="">Bitte für PV/BESS-Szenarien auswählen</option>

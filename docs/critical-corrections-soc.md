@@ -158,12 +158,13 @@ preserve the existing full diagnostics/export payload.
 
 ## Automatic charging during unattended locks
 
-New/missing location mode defaults to `automatic_balanced`. In an unattended
-lock, new connections (including arrival exceptions) and switching are prohibited.
-Scheduled departures still release connectors. The initial unknown parked fleet
-can be initialized as already connected; cyclic boundary constraints and explicit
-initial connections remain enforced. This is not a permission to connect a bus
-arriving inside the first locked slot.
+New/missing location mode defaults to `automatic_balanced`. During a lock,
+arriving buses may connect to free charging points. Existing parked buses retain
+their connectors, including after charging stops; manual switching is prohibited.
+Scheduled timetable departures still release connectors. The initial unknown
+parked fleet can be initialized as already connected; cyclic boundary constraints
+and explicit initial connections remain enforced. See `charging-lock-arrivals.md`
+for the updated arrival rule and legacy setting migration.
 
 Already connected, chargeable buses use capped equal shares of maximum available
 site power in each grid interval. A bus constrained by its SoC target, bus power
@@ -181,12 +182,11 @@ arbitrage can defer unattended bus charging. Site, connector, bus, grid and
 storage constraints remain enforced. Exact curve saturation adds variables only
 in automatic locked periods; the earlier compact formulation applies elsewhere.
 
-The selectable `optimized` mode retains the previous power optimization and
-optional arrival exception. UI and frozen solver requests explicitly record the
-mode; ZIP and XLSX location settings include it. Old saved results remain
-historical. The grid-only arrival reference uses the same capped equal shares
-and strict connection rule for automatic locks. A previous request missing this
-new field must set `optimized` explicitly to replay the older switching-only rule.
+The selectable `optimized` mode retains price-dependent power optimization.
+Both modes use the same arrival/connector retention rule. UI and frozen solver
+requests explicitly record the mode; ZIP and XLSX location settings include it.
+Old saved results remain historical. The grid-only arrival reference uses the
+same capped equal shares and connection rule for automatic locks.
 
 ## Independent location capacities
 

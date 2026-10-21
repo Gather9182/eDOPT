@@ -1,3 +1,4 @@
+from .flat_rate import flat_rate_results
 import math
 import pulp
 import time
@@ -553,6 +554,7 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
         ))
 
     return OptimizationResult(
+        **flat_rate_results(inputs,baseline_load,total_cost,baseline_issues),
         soc_policy=soc_policy_results(inputs, soc_profiles, minimum_soc_deviation),
         end_condition=end_condition_results(inputs, soc_profiles),
         **visit_results,
@@ -693,6 +695,7 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
     baseline_cost = np.sum(baseline_load * np.array(inputs.electricity_prices) * delta_t / 1000.0)
 
     return OptimizationResult(
+        **flat_rate_results(inputs,baseline_load,total_cost_eur,baseline_issues),
         soc_policy=soc_policy_results(inputs, soc_profiles, minimum_soc_deviation),
         end_condition=end_condition_results(inputs, soc_profiles),
         **visit_results,

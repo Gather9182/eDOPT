@@ -1,0 +1,15 @@
+# Long-term route summary CSV
+
+Available as Route Summary CSV on Results (overview and day audit) and Long-Term Route Summary on Export. Report PDF is disabled. The previous Results Export Data multi-download action is removed. Export runs in the existing worker and reads the saved result from storage, without transferring annual profiles through the UI thread.
+
+CSV uses UTF-8 BOM, semicolon delimiters, German decimal commas and quoted text, including semicolon-separated site names. It has the seven requested columns plus an eighth energy-source/explanation column. The table includes imported routes and exclusions from the saved run, never current project values.
+
+The /Jahr headings follow the requested schema. Values cover only evaluated days of the selected period; they are never extrapolated to 365 days. Every row records the date range, evaluated-day count and known failed/skipped count. Partial years remain partial. Repeated daily timetable assumptions of the saved analysis remain in force.
+
+Diesel kilometres sum original saved timetable trip distances times evaluated full days. Electric kilometres add executed additional charging trips. Candidate opportunities do not add kilometres. Transfer legs take precedence over round-trip visit summaries to prevent double counting. Excluded routes have no invented electric kilometres or energy. Proven energy/model exclusions are labelled only under their documented model assumptions; manual or mapping exclusions remain unevaluated. Heuristic/incomplete schedules do not become a positive feasibility proof. Missing data stays unavailable rather than zero.
+
+For grid-only charging, bus charging power integrated over time gives grid imports before bus charging losses. For PV/storage, direct PV and storage output are assigned only at the configured energy site and apportioned by each bus's charging power in that slot. Other sites remain grid supplied. Missing/contradictory source or connection evidence prevents a numerical claim for affected routes.
+
+Grid charging of stationary storage is apportioned across route totals by each route's share of storage output over the evaluated period. This is an accounting allocation, not a claim of measured physical provenance. It can include losses and remaining stored energy; initial storage provenance is unknown. Grid input with no attributable storage output is explicitly reported as unassigned. The grid column includes direct grid energy plus assigned grid charging of storage. The last column separately gives total charger energy, direct grid, direct PV, battery output and assigned upstream storage-grid input; battery output is not added again as direct grid consumption. These source totals and upstream procurement totals are different accounting boundaries and should not be added together.
+
+Charging sites are listed only for periods with positive bus charging power; candidate locations and zero-power connector occupation do not count. Full saved results are exported even while a day drill-down is displayed. Older results without detailed profiles or original trip distances receive explicit missing-information notes.

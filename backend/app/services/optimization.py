@@ -1,3 +1,4 @@
+from .flat_rate import flat_rate_results
 import numpy as np
 from typing import Dict, List
 from ..models import OptimizationInputs, OptimizationResult, BusDiagnostic, PVConfig, BESSConfig
@@ -255,6 +256,7 @@ async def run_placeholder_optimization(inputs: OptimizationInputs, solver_logs: 
             max_usable_prof.append(round(bess_cfg.capacity_kwh * cf, 4))
 
     return OptimizationResult(
+        **flat_rate_results(inputs,None,total_cost,['Heuristic fallback is not a validated arrival baseline.']),
         baseline_feasible=False,
         baseline_issues=['Charge-on-arrival was not validated for this heuristic fallback.'],
         scenario=inputs.scenario,

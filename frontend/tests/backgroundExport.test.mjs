@@ -74,3 +74,12 @@ test('ZIP CRC matches the standard test vector and reports actual packed file co
  assert.equal(header.getUint32(14,true),0xcbf43926);
  assert.equal(progress.at(-1).completed,1);assert.equal(progress.at(-1).total,1);
 });
+
+test('route-summary CSV is produced by the existing background worker',async()=>{
+ const results={is_long_term:true,total_days:1,status:'Optimal',scenario:'baseline',schedules_by_day:[{A:[1,1]}],additional_trips:{},
+  run_metadata:{run_id:'routes-worker',inputs:{time_step_minutes:720,buses:[{id:'A',vehicle_type:'EV',trips:[{dist_m:2000}]}]}}};
+ const output=await backgroundExport({format:'routes'},{identity:'routes-worker',getItem:async()=>results,
+  createWorker:()=>nodeWorker({optimization_results:results})});
+ assert.equal(output.blob.type,'text/csv;charset=utf-8');assert.match(await output.blob.text(),/Umlauf-ID/);
+ assert.match(output.filename,/Umlaufuebersicht/);
+});

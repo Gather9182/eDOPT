@@ -90,12 +90,13 @@ const Export = ({ projectData }) => {
           getItem,onProgress:setExportProgress,signal:controller.signal});
       const url=URL.createObjectURL(result.blob);
       const link=document.createElement('a');
-      link.href=url;link.download=getFormattedFilename(results,format==='analysis' ? 'analysis.zip' : format==='excel' ? 'xlsx' : format);
+      link.href=url;link.download=result.filename || getFormattedFilename(results,format==='analysis' ? 'analysis.zip' : format==='excel' ? 'xlsx' : format);
       document.body.appendChild(link);link.click();link.remove();
       setTimeout(()=>URL.revokeObjectURL(url),60000);
       if(format==='analysis') setZipNotice(result.missingCount
         ? `Analysis ZIP exported with ${result.missingCount} missing-information notes. See README.txt and manifest.json.`
         : `Analysis ZIP exported: ${result.fileCount} files with results, original run inputs, settings and source data.`);
+      if(format==='routes') setZipNotice(result.notice);
       triggerSuccessAlert(format);
     } catch(error) {
       if(error.name==='AbortError') setZipNotice('Export cancelled. Saved results are unchanged.');
@@ -156,6 +157,11 @@ const Export = ({ projectData }) => {
   const co2SavedT = baseCo2EmissionsT - co2EmissionsT;
 
   const exportOptions = [
+    ...(results.is_long_term ? [{
+      id:'routes',title:'Long-Term Route Summary',format:'CSV',icon:<TableIcon size={24} />,
+      desc:'One row per saved route: vehicle group, timetable kilometres, electric kilometres including executed charging trips, feasibility, grid imports, charging locations and a grid/PV/battery breakdown. Includes excluded routes and period coverage; no annual extrapolation.',
+      action:()=>handleBackgroundDownload('routes'),
+    }] : []),
     {
       id:'analysis',title:'Complete Analysis Package',format:'ZIP',icon:<Archive size={24} />,
       desc:'All stored results, run settings, exact archived solver requests, imported routes, exclusions, charging sites, mappings, original Excel files where available, logs and detailed CSV tables. Includes a README and completeness manifest.',

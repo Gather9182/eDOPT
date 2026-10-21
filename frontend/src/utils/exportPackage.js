@@ -1,8 +1,13 @@
+import {buildRouteSummary} from './routeSummaryExport.js';
 import {resultAnalysisFiles} from './resultAnalysisExport.js';
 import {diagnosticZip} from './diagnosticExport.js';
 
 export async function buildExport({format,results,project,environment={},now=new Date(),apiBase},getItem,onProgress=()=>{}) {
   if (!results) throw new Error('No saved optimization result is available.');
+  if (format==='routes') {
+    const summary=buildRouteSummary(results,onProgress);
+    return {blob:new Blob([summary.csv],{type:'text/csv;charset=utf-8'}),filename:summary.filename,notice:summary.notice};
+  }
   if (format==='analysis') {
     const {files,manifest}=await resultAnalysisFiles(results,project,getItem,environment,now,onProgress);
     onProgress({phase:'archive',message:'Creating ZIP archive',files:files.length});
