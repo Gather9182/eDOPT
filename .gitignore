@@ -74,3 +74,6 @@ backend/data/
 *.xlsx
 # But keep the specific test Excel file required for the backend to run
 !backend/Umlaeufe_Salzburg_Nord_synthetisch.xlsx
+
+# Local operational inputs and analysis exports (keep files outside Git)
+/data/

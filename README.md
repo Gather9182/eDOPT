@@ -155,6 +155,10 @@ and Flexible PV generation paths are unchanged. See [Daily Cyclic energy details
 | `EDOPT_WEATHER_CACHE_PATH` | `backend/data/historical_weather.sqlite3`; persistent raw weather per location/model. |
 | `EDOPT_DAILY_WORKERS` | Backend worker ceiling, capped at four and reduced by measured resource capacity. |
 
+The root `data/` directory is reserved for local operational inputs and analysis exports and is
+excluded from Git. These files are not required to start the application. The separate
+`backend/data/` directory contains generated caches and is also excluded from Git.
+
 For deployments, set cache paths to files on a persistent mounted volume. Local caches are reused
 after restart; deployment persistence cannot be inferred automatically. Shared preparation may finish
 in the background when a user cancels waiting.
