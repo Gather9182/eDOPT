@@ -2732,7 +2732,7 @@ const Results = () => {
         )}
       </div>
       
-      <ExcludedRoutesNotice ids={results.run_metadata?.excluded_bus_ids} />
+      <ExcludedRoutesNotice ids={results.run_metadata?.excluded_bus_ids} reasons={results.run_metadata?.excluded_bus_reasons} />
       <DailyCyclicSummary results={results} />
       <ChargingSiteResults results={results} day={results.is_long_term && isDrillDown ? selectedDay : null} />
       <SocPolicyResults policy={results.soc_policy} />

@@ -21,6 +21,8 @@ async def classify_routes(inputs, findings=(), budget_seconds=20):
     for bus in ordered:
         report_progress('route_diagnostics',f'Checking route {bus.id} in isolation ({len(rows)+1}/{len(ordered)}).',metrics={})
         row = dict(bus_id=bus.id, status='not_determined', diagnostic_candidate=str(bus.id) in candidates,
+                   scope='current_model_assumptions',end_condition='cyclic_soc' if inputs.use_cyclic_soc else 'next_day_readiness' if inputs.use_next_day_readiness else 'end_reserve',
+                   driving_feasibility='not_separately_determined',configured_end_feasibility='not_determined',
                    solver_status='Not checked', reason='The individual-check time budget was exhausted.')
         rows[bus.id] = row
         if needs_remote_profiles:
@@ -35,13 +37,15 @@ async def classify_routes(inputs, findings=(), budget_seconds=20):
         try:
             await run_scenario_optimization(isolated, [])
             row.update(status='feasible_in_isolation', solver_status='Feasible',
-                       reason='A feasible MILP schedule was found for this route alone, with the same horizon, battery targets, charging sites, switching rules and optional trips.')
+                       driving_feasibility='feasible',configured_end_feasibility='feasible',
+                       reason='A feasible isolated MILP schedule was found under the current model assumptions, including the configured end condition, horizon, battery targets, charging sites, switching rules and optional trips. This is not a joint-fleet proof.')
         except OptimizationFailure as error:
             solver_status = error.diagnostics.get('solver_status', 'Error')
             row.update(solver_status=solver_status)
             if solver_status == 'Infeasible':
                 row.update(status='individually_infeasible',
-                           reason='The exact MILP is infeasible for this route even with every other bus removed. Excluding other routes alone cannot make it feasible.')
+                           configured_end_feasibility='infeasible',proof='isolated_milp',
+                           reason=f'The isolated MILP is proven infeasible only under the current model assumptions, including {"Start SoC = End SoC" if inputs.use_cyclic_soc else "the configured end reserve / next-day readiness"}. This does not prove that the timetable alone or the real-world route is generally undrivable. Excluding other routes alone does not resolve this model conflict.')
             else:
                 row['reason'] = 'The isolated solve did not prove feasibility or infeasibility within the time budget.'
         except Exception as error:

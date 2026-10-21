@@ -51,17 +51,41 @@ export const optimizationCapabilities = async () => (await api.get('/optimize/ca
 
 export const historicalCalendar = async (start_date,end_date,resolution_min) =>
   (await api.get('/prices/historical-calendar',{params:{start_date,end_date,resolution_min}})).data;
-export const historicalDayPrices = async (date,resolution_min,signal) =>
-  (await api.get('/prices/historical-day',{params:{date,resolution_min},signal})).data;
+export const historicalDayPrices = async (date,resolution_min,signal,priceWindowMinutes=15) =>
+  (await api.get('/prices/historical-day',{params:{date,resolution_min,price_window_minutes:priceWindowMinutes},signal})).data;
+
+export const historicalPriceCoverage = async (first,last,resolution=15) =>
+  (await api.get('/prices/historical-coverage',{params:{first,last,resolution}})).data;
+
+export async function prepareHistoricalPrices(first,last,resolution=15,{signal,onProgress=()=>{},allowFallback=false,refresh=false}={}) {
+  const {job_id}=(await api.post('/prices/historical-prepare',{first,last,resolution,allow_fallback:allowFallback,refresh},{signal})).data;
+  for (;;) {
+    const state=(await api.get(`/prices/historical-prepare/${job_id}`,{signal})).data;
+    onProgress(state);
+    if(state.status==='failed') throw new Error(`${state.error.code}: ${state.error.message}`);
+    if(state.status==='completed') return state.result;
+    await new Promise(resolve=>setTimeout(resolve,700));
+    if(signal?.aborted) {const error=new Error('Price preparation wait cancelled.');error.code='OPTIMIZATION_CANCELLED';throw error;}
+  }
+}
+
+export async function importSmardCsv(file,timezone) {
+  const form=new FormData();form.append('file',file);form.append('timezone',timezone);
+  return (await api.post('/prices/historical-smard-csv',form)).data;
+}
 
 export const fetchAWattarPrices = async (date) => {
   const response = await api.get(`/prices/awattar?date=${date}`);
   return response.data;
 };
 
-export const getPricesForOptimization = async (date, horizon, resolution) => {
-  const response = await api.post(`/prices/process-optimization-data?date=${date}&horizon_hours=${horizon}&resolution_min=${resolution}`);
-  return response.data;
+export const getPricesForOptimization = async (date, horizon, resolution,{source='smard',allowFallback=false,priceWindowMinutes=15,signal,onProgress}={}) => {
+  if(source==='smard') {
+    const last=new Date(`${date}T00:00:00Z`);last.setUTCDate(last.getUTCDate()+Math.ceil(horizon/24)-1);
+    await prepareHistoricalPrices(date,last.toISOString().slice(0,10),resolution,{signal,onProgress,allowFallback});
+  }
+  const response = await api.post('/prices/process-optimization-data',null,{params:{date,horizon_hours:horizon,resolution_min:resolution,source,price_window_minutes:priceWindowMinutes},signal});
+  return {...response.data,request_selection:{source,allowFallback,priceWindowMinutes}};
 };
 
 export const exportExcel = async (results) => {

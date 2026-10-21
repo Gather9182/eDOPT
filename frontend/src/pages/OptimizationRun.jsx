@@ -1,18 +1,21 @@
 import CustomSelect from '../components/CustomSelect';
 import OptimizationProgress from '../components/OptimizationProgress';
 import DailyRunProgress from '../components/DailyRunProgress';
+import HistoricalPriceStatus from '../components/HistoricalPriceStatus';
+import PriceSourceSettings from '../components/PriceSourceSettings';
+import {priceSelection,marketPricesCurrent} from '../utils/priceSelection';
 import ChargingCurveSettings from '../components/ChargingCurveSettings';
 import {chargingCurveIssues} from '../utils/chargingCurve';
 import {socPolicyInputs, socPolicyIssues, mergeSocPolicies, endConditionPatch, endConditionIssues} from '../utils/socPolicy';
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Zap, Terminal, Battery, Clock, CheckCircle, AlertCircle, Loader2, Table as TableIcon, Info, Save, ChevronDown, ChevronUp, Sun, Layers, LayoutDashboard, Activity, Sliders, MapPin, Navigation } from 'lucide-react';
-import { runOptimization as callOptimizeApi, validateInputs, API_BASE, historicalCalendar, historicalDayPrices, optimizationCapabilities } from '../services/api';
+import { runOptimization as callOptimizeApi, validateInputs, API_BASE, historicalCalendar, historicalDayPrices, optimizationCapabilities,prepareHistoricalPrices,historicalPriceCoverage,importSmardCsv,getPricesForOptimization } from '../services/api';
 import {buildSolverInputs,effectivePrices,solverTimeLimitIssues} from '../utils/solverInputs';
 import {dailyConfigurationIssues,runDailyCyclic,aggregateDailyRun,dailyRecordError,dailyResultsReady} from '../utils/dailyCyclic';
 import { generateDefaultPrices } from '../utils/dataMapping';
 import { getItem, setItem } from '../utils/db';
 import { chargingInputs } from '../utils/charging';
-import { optimizationFleet, excludableBusIds, diagnosedRouteIds, fleetRunMetadata } from '../utils/optimizationFleet';
+import { optimizationFleet, excludableBusIds, diagnosedRouteIds, fleetRunMetadata,exclusionReasons,validationExclusionReasons,diagnosedExclusionReasons } from '../utils/optimizationFleet';
 import ExcludedRoutesNotice from '../components/ExcludedRoutesNotice';
 import ValidationStatusPanel from '../components/ValidationStatusPanel';
 import OptimizationFailurePanel from '../components/OptimizationFailurePanel';
@@ -99,6 +102,19 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
   const [dayLiveProgress,setDayLiveProgress] = useState({});
   const [dayStatuses,setDayStatuses] = useState({});
   const [dailyExecution,setDailyExecution] = useState(null);
+  const [pricePreparation,setPricePreparation]=useState(null);
+  const [csvTimezone,setCsvTimezone]=useState('Europe/Vienna');
+  const [priceBusy,setPriceBusy]=useState(false);
+
+  const preparePriceRange=async (refresh=false)=>{
+    setPriceBusy(true);
+    try {
+      const result=await prepareHistoricalPrices(longTermConfig.startDate,longTermConfig.endDate,localSettings.time_resolution,
+        {allowFallback:priceSelection(projectData).allowFallback,refresh,onProgress:setPricePreparation});
+      setPricePreparation({status:'completed',result});
+    } catch(error) {setPricePreparation({status:'failed',error:{message:error.message}});}
+    finally {setPriceBusy(false);}
+  };
   const logsRef = useRef([]);
   const validationVersionRef = useRef(0);
   const [isValidating, setIsValidating] = useState(false);
@@ -117,7 +133,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
   const { included: activeBuses, excluded: excludedBuses } = optimizationFleet(projectData);
   // A check applies only to the fleet and settings that were actually checked.
   const validationKeyFor = buses => JSON.stringify({ buses, localSettings, scenario, pvConfig, bessConfig, weatherDate, simulationMode, longTermConfig,
-    charging: chargingInputs(projectData), opportunity: resolvedOpportunityConfig(projectData), pricing: projectData.pricing,
+    charging: chargingInputs(projectData), opportunity: resolvedOpportunityConfig(projectData), pricing: projectData.pricing,priceSelection:priceSelection(projectData),priceDate:projectData.meta.price_requested_date,priceLoadKey:projectData.meta.price_load_key,
     initialSoc: projectData.meta.initial_soc_fraction, reserve: projectData.meta.min_final_soc_fraction,
     sourceStep: projectData.meta.time_resolution, latitude: projectData.meta.latitude, longitude: projectData.meta.longitude });
   const validationResult = validationState?.key === validationKeyFor(activeBuses) ? validationState.result : null;
@@ -326,9 +342,6 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       finalPrices = effectivePrices(projectData.pricing,priceAssumptions);
       addLog(`Pricing Mode: ${priceAssumptions.pricing_mode || 'effective'}`);
 
-      if (projectData.pricing.length > 0 && projectData.pricing.length < numPeriods) {
-        addLog('Note: Price data is shorter than horizon. Repeating price pattern.');
-      }
     } else {
       addLog('No uploaded data found. Using mock baseline depot (42 buses).');
       finalPrices = generateDefaultPrices(numPeriods);
@@ -392,6 +405,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             run_metadata: {
               ...fleetRunMetadata(projectData),
               ...runAuditMetadata(analysisRunRef.current?.context,validationState?.diagnostic,logsRef.current),
+              market_price_data:projectData.meta.price_evidence,
               request_inputs:diagnosticClone(inputs),
               inputs: JSON.parse(JSON.stringify(inputsWithRealizedVisits(inputs, result))),
               timestamp: new Date().toISOString(),
@@ -433,6 +447,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           run_metadata: {
             ...fleetRunMetadata(projectData),
             ...runAuditMetadata(analysisRunRef.current?.context,validationState?.diagnostic,logsRef.current),
+              market_price_data:projectData.meta.price_evidence,
             request_inputs:diagnosticClone(inputs),
             inputs: JSON.parse(JSON.stringify(inputsWithRealizedVisits(inputs, result))),
             timestamp: new Date().toISOString(),
@@ -485,6 +500,15 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       addLog('Validating historical calendar in Europe/Vienna. Daily Cyclic repeats the configured timetable; no calendar-day timetable changes.');
       const {dates,excluded_dates:excludedDates=[]}=await historicalCalendar(longTermConfig.startDate,longTermConfig.endDate,settings.time_resolution);
       if (excludedDates.length) addLog(`Daily Cyclic: skipping daylight-saving transition dates: ${excludedDates.map(day=>`${day.date} (${day.local_day_hours}h)`).join(', ')}. These dates are excluded from all totals.`);
+      const selection=priceSelection(project);
+      addLog(`Selected market price source: ${selection.source}.`);
+      const priceReport=selection.source==='smard' ? await prepareHistoricalPrices(longTermConfig.startDate,longTermConfig.endDate,settings.time_resolution,
+        {signal:runAbortRef.current?.signal,allowFallback:selection.allowFallback,onProgress:setPricePreparation}) : {selected_source:'awattar',source:'aWATTar Austria',license:'aWATTar terms; not verified as CC BY 4.0',complete_days:0,required_days:dates.length-excludedDates.length,missing_days:0,external_requests:null,coverage:'checked_per_day'};
+      if(selection.source==='smard') setPricePreparation({status:'completed',result:priceReport});
+      else setPricePreparation(null);
+      checkOptimizationCancelled(runAbortRef.current?.signal);
+      addLog(selection.source==='smard' ? `Price cache: ${priceReport.complete_days}/${priceReport.required_days} complete days; ${priceReport.missing_days} missing; ${priceReport.external_requests} external requests.` : 'aWATTar explicitly selected: prices are fetched and strictly checked per date. No automatic SMARD switch.');
+      if(priceReport.missing_days) addLog('Partial evaluation: incomplete-price dates will remain excluded unless targeted gap preparation recovers them.');
       let capacity=1,capabilityReport=null;
       try {
         capabilityReport=await optimizationCapabilities();
@@ -500,10 +524,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         concurrency,retryPriceFailures:longTermConfig.retryPriceFailures!==false,signal:runAbortRef.current?.signal,
         onExecution:execution=>setDailyExecution(previous=>({...previous,...execution})),
         onDayProgress:day=>setDayStatuses(previous=>({...previous,[day.date]:day.status})),
-        fetchPrices:async (date,{signal=runAbortRef.current?.signal}={})=>{
+        fetchPrices:async (date,{signal=runAbortRef.current?.signal,retry=false}={})=>{
           checkOptimizationCancelled(signal);
           try {
-            const prices=await historicalDayPrices(date,settings.time_resolution,signal);
+            if(retry && selection.source==='smard') await prepareHistoricalPrices(date,date,settings.time_resolution,
+              {signal,allowFallback:selection.allowFallback,onProgress:setPricePreparation});
+            const prices=selection.source==='smard' ? await historicalDayPrices(date,settings.time_resolution,signal,selection.priceWindowMinutes) : await getPricesForOptimization(date,24,settings.time_resolution,{...selection,signal});
             checkOptimizationCancelled(signal);
             return prices;
           } catch(error) {
@@ -522,6 +548,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       const payload=aggregateDailyRun(run);
       if (payload) {
         payload.daily_execution={...payload.daily_execution,host_capabilities:capabilityReport};
+        payload.historical_price_preparation=priceReport;
         payload.run_metadata={...fleetRunMetadata(project),...runAuditMetadata(analysisRunRef.current.context,validationState?.diagnostic,logsRef.current,analysisRunRef.current.requests),
           run_id:runId,timestamp:new Date().toISOString(),scenario:'baseline',is_long_term:true,long_term_mode:'daily_cyclic',
           settings:{...settings,longTermConfig:{...longTermConfig,chunkSizeHours:24}},
@@ -561,8 +588,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     try {
       // 1. Fetch Historical Context
       addLog('Fetching historical weather and price data...');
+      const selection=priceSelection(projectData);
+      if(selection.source==='smard') await prepareHistoricalPrices(longTermConfig.startDate,longTermConfig.endDate,localSettings.time_resolution,
+        {signal:runAbortRef.current?.signal,allowFallback:selection.allowFallback,onProgress:setPricePreparation});
       const contextRes = await fetch(`${API_BASE}/data/historical-context`, {
         method: 'POST',
+        signal:runAbortRef.current?.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           start_date: longTermConfig.startDate,
@@ -570,11 +601,13 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           latitude: projectData.meta.latitude || 48.2,
           longitude: projectData.meta.longitude || 16.3,
           pv_capacity_kw: (scenario === 'pv' || scenario === 'pv_bess') ? pvConfig.capacity_kw : 0,
-          resolution_min: localSettings.time_resolution
+          resolution_min: localSettings.time_resolution,
+          price_source:selection.source,
+          price_window_minutes:selection.priceWindowMinutes
         })
       });
 
-      if (!contextRes.ok) throw new Error('Failed to fetch historical context data.');
+      if (!contextRes.ok) {const failure=await contextRes.json();throw new Error(failure.detail || 'Failed to fetch historical context data.');}
       const contextData = await contextRes.json();
       checkOptimizationCancelled(runAbortRef.current?.signal);
       setProgress(10);
@@ -587,9 +620,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
 
       addLog(`Historical data fetched: ${contextData.prices?.length || 0} price points, ${contextData.pv_yield?.length || 0} PV points.`);
       
-      if (contextData.prices.length < (chunks * periodsPerChunk) && chunks > 1) {
-          addLog(`Warning: Historical data is shorter than requested horizon (${contextData.prices.length} vs ${chunks * periodsPerChunk} points). Padding data...`);
-      }
+      if(contextData.prices.length!==totalDays*periodsPerDay) throw new Error('Incomplete market price horizon. No repeated-day replacement prices were used.');
 
       // 2. Setup Loop Variables (No clearing needed for IndexedDB storage)
       
@@ -667,7 +698,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
         addLog(`Optimizing Chunk ${i + 1}/${chunks} (Day ${Math.floor(startIdx/periodsPerDay) + 1})...`);
 
         // Slice data with padding
-        const chunkPrices = getPaddedSlice(contextData.prices, startIdx, endIdx);
+        const chunkPrices = contextData.prices.slice(startIdx,endIdx);
         const chunkPv = getPaddedSlice(contextData.pv_yield, startIdx, endIdx);
         const chunkTemp = getPaddedSlice(contextData.temperatures, startIdx, endIdx);
 
@@ -893,7 +924,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             timestamp: new Date().toISOString(),
             scenario: scenario,
             is_long_term: true,
-            long_term_mode:'flexible',historical_prices_verified:false,
+            long_term_mode:'flexible',historical_prices_verified:contextData.price_evidence?.coverage==='complete',market_price_data:contextData.price_evidence,
             duration_days: totalDays,
             settings: { ...localSettings, longTermConfig },
             inputs: {
@@ -974,6 +1005,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       setValidationState({ key, result, diagnostic:validationDiagnostic(context, result, request, origin, transportError) });
     };
     const policyIssues = [...solverTimeLimitIssues(localSettings), ...socPolicyIssues(localSettings), ...endConditionIssues(localSettings, simulationMode), ...chargingCurveIssues(localSettings),
+      ...(simulationMode==='single' && projectData.buses.length && !marketPricesCurrent(projectData,projectData.meta.price_requested_date || projectData.meta.price_date || new Date().toISOString().slice(0,10),localSettings.planning_horizon,localSettings.time_resolution)
+        ? [{type:'ERROR',category:'data',code:'PRICE_SOURCE_NOT_LOADED',message:'Load complete prices for the selected source, date, horizon and resolution under Market price source. Previously loaded prices cannot be silently relabelled or repeated.'}] : []),
       ...(simulationMode === 'daily_cyclic' ? dailyConfigurationIssues({...projectData,buses:busesToValidate},localSettings,scenario) : [])];
     if (policyIssues.length) {
       recordValidation({status:'invalid',issues:policyIssues}, null, 'frontend');
@@ -1042,14 +1075,17 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     }
   };
 
-  const handleExcludeUnavailable = async () => {
+  const handleExcludeUnavailable = async (requestedIds=excludableIds) => {
     if (isValidating || !excludableIds.length) return;
-    const remaining = activeBuses.filter(bus => !excludableIds.includes(String(bus.id)));
+    const ids=requestedIds.map(String).filter(id=>excludableIds.includes(id));
+    if(!ids.length)return;
+    const remaining = activeBuses.filter(bus => !ids.includes(String(bus.id)));
     if (!remaining.length) return;
     setProjectData(prev => ({ ...prev, meta: { ...prev.meta,
-      excluded_bus_ids: [...new Set([...(prev.meta.excluded_bus_ids || []).map(String), ...excludableIds])],
+      excluded_bus_ids: [...new Set([...(prev.meta.excluded_bus_ids || []).map(String), ...ids])],
+      excluded_bus_reasons:{...prev.meta.excluded_bus_reasons,...validationExclusionReasons(validationResult,ids)},
     } }));
-    addLog(`Excluding ${excludableIds.length} routes with missing availability or infeasible energy requirements: ${excludableIds.join(', ')}`);
+    addLog(`Excluding ${ids.length} explicitly selected flagged routes; diagnostic causes recorded: ${ids.join(', ')}`);
     await handleValidation(remaining);
   };
 
@@ -1057,7 +1093,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     ++validationVersionRef.current;
     setValidationState(null);
     setIsValidating(false);
-    setProjectData(prev => ({ ...prev, meta: { ...prev.meta, excluded_bus_ids: [] } }));
+    setProjectData(prev => ({ ...prev, meta: { ...prev.meta, excluded_bus_ids: [],excluded_bus_reasons:{} } }));
   };
 
   const handleExcludeDiagnosed = async requestedIds => {
@@ -1067,7 +1103,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     const remaining = activeBuses.filter(bus => !ids.includes(String(bus.id)));
     if (!ids.length || !remaining.length) return;
     setValidationState(null);
-    setProjectData(prev => ({...prev,meta:{...prev.meta,excluded_bus_ids:[...new Set([...(prev.meta.excluded_bus_ids || []).map(String),...ids])]}}));
+    setProjectData(prev => ({...prev,meta:{...prev.meta,excluded_bus_ids:[...new Set([...(prev.meta.excluded_bus_ids || []).map(String),...ids])],
+      excluded_bus_reasons:{...prev.meta.excluded_bus_reasons,...diagnosedExclusionReasons(optimizationFailure,ids)}}}));
     addLog(`Excluding diagnosed routes: ${ids.join(', ')}. Rechecking the remaining fleet.`);
     await handleValidation(remaining);
   };
@@ -1129,7 +1166,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
 
       {status === 'ready' && (
         <div className="animate-in">
-          <ExcludedRoutesNotice ids={excludedBuses.map(bus => String(bus.id))} onRestore={handleRestoreExcluded} disabled={isValidating} />
+          <ExcludedRoutesNotice ids={excludedBuses.map(bus => String(bus.id))} reasons={exclusionReasons(projectData)} onRestore={handleRestoreExcluded} disabled={isValidating} />
           {projectData.charging?.opportunity?.enabled && projectData.meta.timetable_warnings?.some(w => w.type === 'OPPORTUNITY_MAPPING') && <details className="card mb-6">
             <summary>Incomplete additional charging connections are not used</summary>
             <p className="text-sm mt-2">Complete missing distances, charging locations or node assignments under Input Data, then reprocess using Continue to Settings.</p>
@@ -2012,9 +2049,11 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
               ))}
             </div>
 
+            <PriceSourceSettings project={projectData} setProject={setProjectData} loadPrices={simulationMode==='single'} hours={localSettings.planning_horizon} resolution={localSettings.time_resolution} />
+            {simulationMode !== 'daily_cyclic' && <p className="text-sm text-muted">Short-Term and Flexible use complete nominal 24-hour price horizons. A horizon containing a 23/25-hour DST date is rejected explicitly; use Daily Cyclic for date ranges with skipped DST dates.</p>}
             {simulationMode === 'daily_cyclic' && <p className="text-sm text-muted mt-4">Baseline only: one complete 24-hour solve per historical date, using the same configured daily timetable. Daily bus SoC equality and physical connector continuity are checked. Daylight-saving transition days (23/25 hours) are skipped, clearly marked and excluded from all totals; the remaining dates continue normally. No replacement prices or results are generated. Prices are strictly validated. Overnight optional charging visits are not supported. No weekend/holiday timetable changes or global multi-day optimum. Both date endpoints are included. Run Check validates technical settings; prices are checked again for each actual day.</p>}
             {simulationMode !== 'single' && (
-              <div className="grid grid-cols-3 gap-x-4 gap-y-4 mt-4 animate-in slide-in-from-top-2 duration-300">
+              <div className={`price-run-grid ${simulationMode==='daily_cyclic' ? 'is-daily' : ''}`}>
                 <div className="form-group mb-0">
                   <div className="flex items-center justify-between mb-1">
                     <label className="form-label text-[10px] uppercase font-bold text-muted mb-0">Start Date</label>
@@ -2054,19 +2093,55 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                     <option value={48}>48 Hours</option>
                     <option value={72}>72 Hours</option>
                   </CustomSelect>
-                  {simulationMode === 'daily_cyclic' && <div className="mt-4">
+                </div>
+                {simulationMode === 'daily_cyclic' && <>
+                  <div className="form-group mb-0">
                     <label className="form-label" htmlFor="daily-workers">Concurrent day jobs</label>
                     <CustomSelect id="daily-workers" value={longTermConfig.dailyWorkers || 2} onChange={event=>setLongTermConfig(previous=>({...previous,dailyWorkers:Number(event.target.value)}))}>
                       {[1,2,3,4].map(value=><option key={value} value={value}>{value}{value===1 ? ' — serial' : value===2 ? ' — default' : ''}</option>)}
                     </CustomSelect>
-                    <p className="text-sm text-muted mt-2">After a verified seed day. Host capacity may reduce this setting; unsafe midnight boundaries use serial execution. This does not shorten an individual solver timeout.</p>
-                    <label className="flex items-center gap-2 mt-3 text-sm"><input type="checkbox" checked={longTermConfig.retryPriceFailures!==false} onChange={event=>setLongTermConfig(previous=>({...previous,retryPriceFailures:event.target.checked}))} />Retry failed historical-price days after all dates</label>
-                    <p className="text-sm text-muted mt-2">One sequential retry per failed price day with fresh data and unchanged settings. Successful days and DST exclusions are retained. Missing prices are never replaced.</p>
-                  </div>}
-                </div>
+                  </div>
+                  <div className="price-run-options">
+                    <p>Parallel jobs start after a verified reference day. Host limits or midnight connection rules can reduce concurrency; solver timeouts stay unchanged.</p>
+                    <div>
+                      <label><input type="checkbox" checked={longTermConfig.retryPriceFailures!==false} onChange={event=>setLongTermConfig(previous=>({...previous,retryPriceFailures:event.target.checked}))} />Retry remaining price gaps after all dates</label>
+                      <p>One targeted retry for missing intervals. Complete prices and DST exclusions remain unchanged.</p>
+                    </div>
+                  </div>
+                </>}
               </div>
             )}
             
+            {simulationMode==='daily_cyclic' && priceSelection(projectData).source==='smard' && <section className="price-data-tools" aria-label="Historical price tools">
+              <div className="price-tools-heading"><strong>Historical price data</strong><span>SMARD · local cache</span></div>
+              <p className="price-tools-intro">Check saved prices or load only the intervals missing for your selected dates.</p>
+              <div className="price-tools-actions">
+                <button type="button" className="btn btn-outline btn-sm" disabled={priceBusy} onClick={async()=>{
+                  try {setPricePreparation({status:'completed',result:await historicalPriceCoverage(longTermConfig.startDate,longTermConfig.endDate,localSettings.time_resolution)});}
+                  catch(error) {setPricePreparation({status:'failed',error:{message:error.message}});}
+                }}>Check price coverage</button>
+                <button type="button" className="btn btn-primary btn-sm" disabled={priceBusy} onClick={()=>preparePriceRange()}>{priceBusy ? 'Preparing data...' : 'Load missing price data'}</button>
+              </div>
+              <div className="price-tools-optional">
+                <details className="price-tool-details"><summary><span>Import SMARD CSV</span><small>Optional · offline alternative</small></summary>
+                  <div className="price-tool-body price-csv-grid"><div><label className="form-label">CSV timestamp interpretation</label>
+                <CustomSelect value={csvTimezone} onChange={event=>setCsvTimezone(event.target.value)}><option value="Europe/Vienna">Europe/Vienna — local CET/CEST; ambiguous DST rows require explicit offsets</option><option value="UTC">UTC</option></CustomSelect>
+                </div><div><label className="form-label">Original-resolution AT CSV file</label>
+                <input type="file" accept=".csv,text/csv" disabled={priceBusy} onChange={async event=>{
+                  const file=event.target.files?.[0];event.target.value='';if(!file)return;
+                  setPriceBusy(true);
+                  try {const imported=await importSmardCsv(file,csvTimezone);const coverage=await historicalPriceCoverage(longTermConfig.startDate,longTermConfig.endDate,localSettings.time_resolution);setPricePreparation({status:'completed',message:`Imported ${imported.rows} CSV intervals.`,result:coverage});}
+                  catch(error) {setPricePreparation({status:'failed',error:{message:error.response?.data?.detail || error.message}});}
+                  finally {setPriceBusy(false);}
+                }} />
+                  </div><p className="price-csv-note">Choose the timezone used in your file. Ambiguous DST timestamps need explicit UTC offsets.</p></div>
+                </details>
+                <details className="price-tool-details"><summary><span>Refresh source blocks</span><small>Advanced · explicit correction</small></summary>
+                  <div className="price-tool-body"><p>Download selected SMARD blocks again to check for source corrections. Saved analysis snapshots remain unchanged.</p><button type="button" className="btn btn-outline btn-sm" disabled={priceBusy} onClick={()=>preparePriceRange(true)}>Refresh source blocks</button></div>
+                </details>
+              </div>
+              <HistoricalPriceStatus state={pricePreparation} />
+            </section>}
             {simulationMode === 'long_term' && longTermConfig.startDate && longTermConfig.endDate && (
               (() => {
                 const totalDays = Math.round((new Date(longTermConfig.endDate) - new Date(longTermConfig.startDate)) / (1000 * 60 * 60 * 24)) + 1;
@@ -2147,7 +2222,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           <div className="progress-bar-container" role="progressbar" aria-label="Optimization in progress">
             <div className="progress-bar progress-bar-indeterminate"></div>
           </div>
-          <p className="text-sm text-muted" style={{maxWidth:520,margin:'12px auto 0'}}>{simulationMode==='daily_cyclic' ? 'Track completed days and active jobs below.' : 'Live backend phases and solver evidence are shown below. The optimization gap is not a completion percentage.'}</p>
+          <p className="text-sm text-muted" style={{maxWidth:520,margin:'12px auto 0'}}>{simulationMode==='daily_cyclic' ? 'Track price preparation, completed days and active jobs below.' : 'Live backend phases and solver evidence are shown below. The optimization gap is not a completion percentage.'}</p>
           <button className="btn btn-outline mt-4" disabled={isCancelling} onClick={()=>{
             setIsCancelling(true);
             runAbortRef.current?.abort();
@@ -2159,9 +2234,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
               {timeLeftText}
             </div>
           )}
+          <div className="running-status-panels">
+          {simulationMode!=='single' && priceSelection(projectData).source==='smard' && <HistoricalPriceStatus state={pricePreparation} />}
           {simulationMode==='daily_cyclic'
             ? <DailyRunProgress statuses={dayStatuses} telemetry={dayLiveProgress} execution={dailyExecution} />
             : <OptimizationProgress state={liveProgress} />}
+          </div>
         </div>
       )}
 

@@ -8,7 +8,7 @@ export default function OptimizationFailurePanel({ diagnostic, message, onExport
   const step = diagnostic?.request?.time_step_minutes || 15;
   const clock = minute => `${String(Math.floor(minute / 60)).padStart(2,'0')}:${String(minute % 60).padStart(2,'0')}`;
   const classification = backend?.route_feasibility;
-  const labels = {individually_infeasible:'Individually infeasible',affected_by_fleet_conflict:'Affected by fleet conflict',
+  const labels = {individually_infeasible:'Infeasible under current model',affected_by_fleet_conflict:'Affected by fleet conflict',
     feasible_in_isolation:'Feasible in isolation',not_determined:'Not determined'};
   const individualIds = (classification?.routes || []).filter(row => row.status === 'individually_infeasible' && excludableIds.includes(String(row.bus_id))).map(row => String(row.bus_id));
   return <section className="card mb-6" role="alert" style={{borderColor:'var(--warning)'}}>

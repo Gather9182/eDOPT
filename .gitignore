@@ -64,6 +64,11 @@ git.cmd
 # Exclude scratch / temporary scripts directories
 scratch/
 backend/scratch/
+backend/data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.import.lock
 
 # Data and large temporary files
 *.xlsx

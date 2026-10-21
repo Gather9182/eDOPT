@@ -1,7 +1,9 @@
 import CustomSelect from '../components/CustomSelect';
 import React, { useState, useRef, useEffect } from 'react';
 import { Upload, Table as TableIcon, Plus, Save, AlertCircle, Loader2, FileSpreadsheet, Check, Zap, Download, Clock, TrendingUp, Info, Circle, Settings, Battery, MapPin, ArrowRight } from 'lucide-react';
-import { preScanExcel, processExcel, fetchAWattarPrices, getPricesForOptimization } from '../services/api';
+import { preScanExcel, processExcel, getPricesForOptimization } from '../services/api';
+import PriceSourceSettings from '../components/PriceSourceSettings';
+import {priceSelection,marketPricesCurrent,withMarketPrices} from '../utils/priceSelection';
 import PriceChart from '../components/PriceChart';
 import ChargingSitesEditor from '../components/ChargingSitesEditor';
 import OpportunityChargingEditor from '../components/OpportunityChargingEditor';
@@ -151,10 +153,10 @@ const InputData = ({ projectData, setProjectData, setActiveTab }) => {
       if (continueToSettings) {
         let nextProject = projectWithTimetable(projectData, data, context);
         const requestedDate = nextProject.meta.price_requested_date;
-        if (requestedDate && (requestedDate !== nextProject.meta.price_date || !nextProject.pricing?.length)) {
-          const prices = await getPricesForOptimization(requestedDate, nextProject.meta.planning_horizon, nextProject.meta.time_resolution);
+        if (requestedDate && !marketPricesCurrent(nextProject,requestedDate,nextProject.meta.planning_horizon,nextProject.meta.time_resolution)) {
+          const prices = await getPricesForOptimization(requestedDate, nextProject.meta.planning_horizon, nextProject.meta.time_resolution,priceSelection(nextProject));
           if (!prices.prices?.length) throw new Error('No electricity prices were found for the selected date.');
-          nextProject = { ...nextProject, pricing: prices.prices, meta: { ...nextProject.meta, price_date: requestedDate, price_unit: 'EUR/MWh', price_source: 'awattar' } };
+          nextProject=withMarketPrices(nextProject,prices,requestedDate,nextProject.meta.planning_horizon,nextProject.meta.time_resolution);
         }
         context.sourceKey = uploadedFile ? await saveTimetableSource(file, setItem) : projectData.meta.timetable_source_key;
         if (version !== operationVersion.current) return;
@@ -1213,16 +1215,17 @@ const PricingTab = ({ projectData, setProjectData, onBusyChange, onError }) => {
     setProjectData(prev => ({ ...prev, meta: { ...prev.meta, price_assumptions: { ...assumptions, [key]: value } } }));
   };
 
-  const handleFetchAWattar = async () => {
+  const handleFetchPrices = async () => {
     setIsLoading(true);
     onBusyChange(true);
     onError('');
     try {
-      const data = await fetchAWattarPrices(selectedDate);
-      const result = await getPricesForOptimization(selectedDate, projectData.meta.planning_horizon || 24, projectData.meta.time_resolution || 15);
+      const hours=projectData.meta.planning_horizon || 24,resolution=projectData.meta.time_resolution || 15;
+      const result = await getPricesForOptimization(selectedDate,hours,resolution,priceSelection(projectData));
       if (!result.prices?.length) throw new Error('No electricity prices were found for the selected date.');
-      setPriceData(data.prices);
-      setProjectData(prev => ({ ...prev, pricing: result.prices, meta: { ...prev.meta, price_date: selectedDate, price_requested_date: selectedDate, price_preview: data.prices, price_unit: 'EUR/MWh', price_source: 'awattar' } }));
+      const next=withMarketPrices(projectData,result,selectedDate,hours,resolution);
+      setPriceData(next.meta.price_preview);
+      setProjectData(prev=>withMarketPrices(prev,result,selectedDate,hours,resolution));
     } catch (err) {
       console.error(err);
       onError(err.response?.data?.detail || err.message || 'Electricity prices could not be loaded.');
@@ -1233,7 +1236,7 @@ const PricingTab = ({ projectData, setProjectData, onBusyChange, onError }) => {
   };
 
   const handleCsvUpload = () => {
-    alert('Manual CSV upload logic would go here. For now, please use the aWATTar API.');
+    alert('Use the SMARD CSV importer under Optimization Engine → Daily Cyclic. Imported cache prices are available to all modes.');
   };
 
   return (
@@ -1248,6 +1251,7 @@ const PricingTab = ({ projectData, setProjectData, onBusyChange, onError }) => {
               <Settings size={18} />
               1. Market Data Sync
             </h3>
+            <PriceSourceSettings project={projectData} setProject={setProjectData} disabled={isLoading} />
 
             <div className="form-group mb-6">
               <div className="flex items-center justify-between mb-1">
@@ -1258,10 +1262,11 @@ const PricingTab = ({ projectData, setProjectData, onBusyChange, onError }) => {
                 type="date"
                 className="form-input"
                 value={selectedDate}
+                disabled={isLoading}
                 onChange={(e) => { setSelectedDate(e.target.value); setProjectData(prev => ({ ...prev, meta: { ...prev.meta, price_requested_date: e.target.value } })); }}
               />
               <p style={{ fontSize: '10px' }} className="text-muted mt-1 italic px-0.5">
-                Austrian EPEX Spot Day-Ahead prices (aWATTar)
+                Austrian day-ahead prices · selected source: {priceSelection(projectData).source}
               </p>
             </div>
 
@@ -1288,11 +1293,11 @@ const PricingTab = ({ projectData, setProjectData, onBusyChange, onError }) => {
               <div className="flex gap-3">
                 <button
                   className="btn btn-primary flex-1 py-3 flex items-center justify-center gap-2 shadow-lg"
-                  onClick={handleFetchAWattar}
+                  onClick={handleFetchPrices}
                   disabled={isLoading}
                 >
                   {isLoading ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
-                  Fetch aWATTar
+                  Fetch selected source
                 </button>
 
               </div>

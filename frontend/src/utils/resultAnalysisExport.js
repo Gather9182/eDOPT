@@ -70,10 +70,12 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
     {name:'run/solver_request.json',data:json(metadata.request_inputs)},
     {name:'run/runtime_settings.json',data:json(context?.runtime_settings || metadata.settings)},
     {name:'run/input_check.json',data:json(metadata.validation_snapshot)},
+    {name:'run/market_price_data.json',data:json(metadata.market_price_data || metadata.audit_context?.project?.meta?.price_evidence || null)},
     {name:'run/logs.json',data:json({solver:results.solver_logs || [],interface:metadata.interface_logs || []})},
     {name:'environment_at_export.json',data:json(environment)},
   ];
   if (results.long_term_mode === 'daily_cyclic') {
+    files.push({name:'run/days/price_preparation.json',data:json(results.historical_price_preparation || null)});
     files.push({name:'run/days/status.json',data:json({status:results.run_status,scope:results.timetable_scope,execution:results.daily_execution,dst_policy:results.dst_policy,skipped_dates:results.skipped_dates || [],completed_dates:results.completed_dates,completed_day_indices:results.completed_day_indices,days:results.day_records,failed_attempts:results.failed_attempts || []})});
     for (const [index,day] of (results.daily_results || []).entries()) {
       if(index%8===0) onProgress({phase:'daily',message:'Writing daily evidence',completed:index,total:results.daily_results.length});
@@ -222,9 +224,12 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
   })())});
   const includedIds = new Set(buses.map(bus => String(bus.id)));
   const excludedIds = (metadata.excluded_bus_ids || []).map(String);
+  const excludedReasons=metadata.excluded_bus_reasons || project?.meta?.excluded_bus_reasons || {};
   const originalRoutes = project?.buses || buses;
   files.push({name:'tables/routes.csv',data:objectCsv(originalRoutes.map(bus => ({
     id:bus.id,included_in_run:includedIds.has(String(bus.id)),excluded_from_run:excludedIds.includes(String(bus.id)),
+    exclusion_category:excludedIds.includes(String(bus.id)) ? excludedReasons[bus.id]?.category || 'manual_or_unspecified' : null,
+    exclusion_evidence:excludedIds.includes(String(bus.id)) ? excludedReasons[bus.id] || null : null,
     vehicle_type:bus.vehicle_type,battery_kwh:bus.max_battery_capacity_kwh,efficiency:bus.efficiency,max_power_kw:bus.max_power_kw,
     initial_soc_kwh:bus.initial_soc_kwh,minimum_final_soc_kwh:bus.min_final_soc_kwh,next_day_required_energy_kwh:bus.next_day_required_energy_kwh,
     trip_energy_kwh:total(bus.trip_energy_profile_kwh),trips:bus.trips?.length || 0,
@@ -249,7 +254,7 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
     run_timestamp:metadata.timestamp || null,scenario:results.scenario || null,is_long_term:Boolean(results.is_long_term),
     long_term_mode:results.long_term_mode || metadata.long_term_mode || null,run_status:results.run_status || null,requested_days:results.requested_days ?? null,timetable_scope:results.timetable_scope || null,
     solver_status:results.status ?? null,optimization_gap:results.optimization_gap ?? null,baseline_feasible:results.baseline_feasible ?? null,
-    total_days:results.total_days ?? null,time_step_minutes:usableStep,included_bus_ids:[...includedIds],excluded_bus_ids:excludedIds,
+    total_days:results.total_days ?? null,time_step_minutes:usableStep,included_bus_ids:[...includedIds],excluded_bus_ids:excludedIds,excluded_bus_reasons:excludedReasons,
     project_snapshot_available:Boolean(project),exact_single_request_available:Boolean(metadata.request_inputs),
     request_archive:requestArchive,storage_pruned:Boolean(results.storage_pruned),sources,missing_information:missing,
     units:{power:'kW',battery_energy:'kWh',electricity_prices:'EUR/MWh',distance:'m for timetable trips; km for mappings',time:'minutes; periods/days are zero-based'},

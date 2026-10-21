@@ -43,6 +43,15 @@ test('analysis package exports the saved charging curve without substituting cur
   assert.match(files.find(file=>file.name==='tables/charging_curve.csv').data,/22.5/);
 });
 
+test('exclusion causes are exported from the saved run rather than inferred from current settings',async()=>{
+ const {results,current}=fixture();
+ results.run_metadata.excluded_bus_reasons={EXCLUDED:{category:'missing_availability',scope:'Recorded mapping only; no energy proof.'}};
+ current.meta.excluded_bus_reasons={EXCLUDED:{category:'energy_proven'}};
+ const {files,manifest}=await resultAnalysisFiles(results,current,lookup);
+ assert.equal(manifest.excluded_bus_reasons.EXCLUDED.category,'missing_availability');
+ assert.match(files.find(file=>file.name==='tables/routes.csv').data,/missing_availability/);
+});
+
 test('analysis package preserves cyclic end condition and per-bus equality evidence',async () => {
   const {results,current}=fixture();
   results.run_metadata.request_inputs.use_cyclic_soc=true;

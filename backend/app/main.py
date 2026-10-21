@@ -3,6 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from .models import OptimizationInputs, OptimizationResult
 from .services.optimization import run_optimization
 from .services.price_service import PriceService, AWattarProvider, historical_calendar, historical_calendar_exclusions
+from .services.historical_prices import HistoricalPrices,PricePreparationJobs
+from .services.historical_price_store import PriceDataError,announce_price_store
+from .services.market_prices import selected_market_prices
 from .utils.excel_processor import process_umlauf_excel, scan_umlauf_excel
 from .services.charging_sites import validate_sites
 from .services.feasibility import energy_feasibility_issues
@@ -16,6 +19,12 @@ import platform
 app = FastAPI(title="eDOPT Optimization API")
 from .services.optimization_progress import OptimizationJobs
 optimization_jobs = OptimizationJobs()
+price_jobs = PricePreparationJobs()
+
+
+@app.on_event('startup')
+def price_cache_startup():
+    announce_price_store()
 
 
 @app.get('/api/optimize/capabilities')
@@ -57,6 +66,8 @@ class HistoricalContextRequest(BaseModel):
     longitude: float
     pv_capacity_kw: float
     resolution_min: int = 15
+    price_source: str = 'smard'
+    price_window_minutes: int = 15
 
 app.add_middleware(
     CORSMiddleware,
@@ -82,11 +93,50 @@ def get_historical_calendar(start_date: str,end_date: str,resolution_min: int=15
 
 
 @app.get('/api/prices/historical-day')
-async def get_strict_historical_day(date: str,resolution_min: int=15):
+def get_strict_historical_day(date: str,resolution_min: int=15,price_window_minutes: int=15):
     try:
-        return await PriceService().get_strict_historical_day(date,resolution_min)
+        return HistoricalPrices().day(date,resolution_min,price_window_minutes)
+    except PriceDataError as error:
+        raise HTTPException(status_code=400,detail=f'{error.code}: {error}')
     except (ValueError,KeyError,TypeError) as error:
         raise HTTPException(status_code=400,detail=str(error))
+
+
+class HistoricalPricePreparation(BaseModel):
+    first: str
+    last: str
+    resolution: int = 15
+    allow_fallback: bool = False
+    refresh: bool = False
+
+
+@app.get('/api/prices/historical-coverage')
+def price_coverage(first: str,last: str,resolution: int=15):
+    try:return HistoricalPrices().coverage(first,last,resolution)
+    except ValueError as error:raise HTTPException(status_code=400,detail=str(error))
+
+
+@app.post('/api/prices/historical-prepare',status_code=202)
+def prepare_prices(options: HistoricalPricePreparation):
+    try:
+        historical_calendar(options.first,options.last,options.resolution)
+        return {'job_id':price_jobs.start(options.model_dump())}
+    except ValueError as error:raise HTTPException(status_code=400,detail=str(error))
+
+
+@app.get('/api/prices/historical-prepare/{job_id}')
+def prepared_prices(job_id: str):
+    try:return price_jobs.get(job_id)
+    except KeyError:raise HTTPException(status_code=404,detail='Price preparation job is unavailable.')
+
+
+@app.post('/api/prices/historical-smard-csv')
+def import_smard_csv(file: UploadFile=File(...),timezone: str=Form(...),refresh: bool=Form(False)):
+    try:
+        content=file.file.read(30*1024*1024+1)
+        if len(content)>30*1024*1024:raise PriceDataError('INVALID_RESPONSE','CSV exceeds the 30 MB import limit.')
+        return HistoricalPrices().import_csv(content,file.filename or 'smard.csv',timezone,refresh)
+    except PriceDataError as error:raise HTTPException(status_code=400,detail=f'{error.code}: {error}')
 
 @app.post("/api/optimize", response_model=OptimizationResult)
 async def optimize_depot(inputs: OptimizationInputs):
@@ -108,6 +158,8 @@ async def validate_inputs(inputs: OptimizationInputs, include_diagnostics: bool 
     Validates the input data structure and internal consistency.
     """
     def response(result):
+        result['route_energy_checks']=route_energy_checks
+        result['energy_check_scope']='Necessary optimistic energy bounds under the current model assumptions. Passing a bound is not a feasible charging-schedule proof.'
         for issue in result.get('issues', []):
             prefix = issue.get('message', '').split(':', 1)[0]
             issue.setdefault('category', 'storage' if prefix == 'BESS' else 'solar' if prefix == 'PV' else 'data')
@@ -127,6 +179,7 @@ async def validate_inputs(inputs: OptimizationInputs, include_diagnostics: bool 
         return result
 
     issues = []
+    route_energy_checks=[]
     sites_valid = True
     try:
         validate_sites(inputs)
@@ -180,7 +233,8 @@ async def validate_inputs(inputs: OptimizationInputs, include_diagnostics: bool 
                 "code": "NO_CHARGING_AVAILABILITY",
                 "category": "charging",
                 "bus_id": bus.id,
-                "message": f"Bus {bus.id} has NO availability for charging during the entire horizon."
+                "details": {"reason":"missing_charging_mapping_or_window","proof":"none","scope":"current_model_assumptions"},
+                "message": f"Route {bus.id}: No mapped charging availability was found. Check charging-location/node assignments and layovers. This warning alone does not prove that the timetable is energetically infeasible."
             })
 
     # Check 4: Readiness consistency
@@ -223,7 +277,7 @@ async def validate_inputs(inputs: OptimizationInputs, include_diagnostics: bool 
             issues.append({"type": "WARNING", "message": "PV: Peak power is 0 or negative, but a PV scenario is selected."})
 
     if (inputs.charging_sites or policy_active(inputs)) and not any(issue["type"] == "ERROR" for issue in issues):
-        issues.extend(energy_feasibility_issues(inputs))
+        issues.extend(energy_feasibility_issues(inputs,route_energy_checks))
 
     if any(issue["type"] == "ERROR" for issue in issues):
         return response({"status": "invalid", "issues": issues})
@@ -297,15 +351,17 @@ async def get_awattar_prices(date: str, horizon_hours: int = 24):
 async def process_prices_for_optimization(
     date: str, 
     horizon_hours: int = 24, 
-    resolution_min: int = 15
+    resolution_min: int = 15,
+    source: str = 'smard',
+    price_window_minutes: int = 15
 ):
     """
     Returns a flattened list of prices mapped to the optimization horizon.
     """
     try:
-        service = PriceService(AWattarProvider())
-        prices = await service.get_prices_for_optimization(date, horizon_hours, resolution_min)
-        return {"prices": prices}
+        return await selected_market_prices(date,horizon_hours,resolution_min,source,price_window_minutes=price_window_minutes)
+    except PriceDataError as error:
+        raise HTTPException(status_code=400,detail=f'{error.code}: {error}')
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Price Mapping Error: {str(e)}")
 
@@ -328,8 +384,8 @@ async def get_historical_context(req: HistoricalContextRequest):
         resolution_min = req.resolution_min
 
         # 1. Prices
-        price_service = PriceService(AWattarProvider())
-        prices = await price_service.get_prices_for_optimization(start_date_clean, horizon_hours, resolution_min)
+        price_evidence=await selected_market_prices(start_date_clean,horizon_hours,resolution_min,req.price_source,price_window_minutes=req.price_window_minutes)
+        prices=price_evidence['prices']
         
         # 2. PV Yield
         from .services.pv_service import PVService as pv_instance
@@ -347,11 +403,14 @@ async def get_historical_context(req: HistoricalContextRequest):
             "start_date": start_date_clean,
             "end_date": end_date_clean,
             "prices": prices,
+            "price_evidence": price_evidence,
             "pv_yield": pv_yield,
             "temperatures": temps,
             "horizon_hours": horizon_hours,
             "days": days
         }
+    except PriceDataError as error:
+        raise HTTPException(status_code=400,detail=f'{error.code}: {error}')
     except Exception as e:
         import traceback
         traceback.print_exc()

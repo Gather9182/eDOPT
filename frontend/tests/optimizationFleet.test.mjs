@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { optimizationFleet, excludableBusIds, diagnosedRouteIds, fleetRunMetadata } from '../src/utils/optimizationFleet.js';
+import { optimizationFleet, excludableBusIds, diagnosedRouteIds, fleetRunMetadata,validationExclusionReasons,diagnosedExclusionReasons,exclusionReasonLabel } from '../src/utils/optimizationFleet.js';
 
 test('only explicitly identified route energy or availability issues can exclude known routes', () => {
   const buses = [{id:'Bus: A'}, {id:2}, {id:'Other'}];
@@ -30,7 +30,8 @@ test('exclusions survive project persistence without removing or editing importe
   assert.deepEqual(optimizationFleet(restored).excluded, [original.buses[1]]);
   assert.equal(original.buses.length,2);
   assert.deepEqual(original.meta,{});
-  assert.deepEqual(fleetRunMetadata(restored), {imported_bus_count:2,excluded_bus_ids:['2']});
+  assert.deepEqual(fleetRunMetadata(restored).excluded_bus_ids,['2']);
+  assert.equal(fleetRunMetadata(restored).excluded_bus_reasons['2'].category,'manual_or_unspecified');
   assert.equal(optimizationFleet({...restored,meta:{excluded_bus_ids:[]}}).included.length,2);
 });
 
@@ -64,4 +65,20 @@ test('diagnosed exclusion requires an exact known classification, never just a d
   assert.deepEqual(diagnosedRouteIds(diagnostic,buses),['bad','conflict']);
   assert.deepEqual(diagnosedRouteIds(diagnostic,buses,true),['bad']);
   assert.deepEqual(diagnosedRouteIds(null,buses),[]);
+});
+
+test('recorded exclusion causes separate energy proof, missing mapping, manual history and fleet conflicts',()=>{
+ const validation={issues:[{bus_id:'E',type:'ERROR',code:'BUS_ENERGY_INFEASIBLE',details:{proof:'optimistic_energy_bound',scope:'current_model_assumptions',reason:'cyclic_soc_shortfall',missing_energy_kwh:.2}},
+  {bus_id:'N',type:'WARNING',code:'NO_CHARGING_AVAILABILITY',details:{proof:'none'}}]};
+ const reasons=validationExclusionReasons(validation,['E','N'],'fixture');
+ assert.equal(reasons.E.category,'energy_proven');assert.equal(reasons.N.category,'missing_availability');
+ assert.match(exclusionReasonLabel(reasons.N.category),/not proven infeasible/);
+ const project={buses:[{id:'E'},{id:'N'},{id:'M'}],meta:{excluded_bus_ids:['E','N','M'],excluded_bus_reasons:reasons}};
+ const metadata=fleetRunMetadata(project);
+ assert.equal(metadata.excluded_bus_reasons.M.category,'manual_or_unspecified');
+ assert.deepEqual(metadata.excluded_bus_reasons.E.evidence[0].details.missing_energy_kwh,.2);
+ const diagnostic={result:{diagnostics:{route_feasibility:{routes:[{bus_id:'B',status:'individually_infeasible'},{bus_id:'F',status:'affected_by_fleet_conflict'}]}}}};
+ const diagnosed=diagnosedExclusionReasons(diagnostic,['B','F']);
+ assert.equal(diagnosed.B.category,'model_infeasible');assert.equal(diagnosed.F.category,'fleet_conflict');
+ assert.deepEqual(project.buses.map(bus=>bus.id),['E','N','M']);
 });

@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 import pytz
 import math
+from .historical_price_store import PriceDataError
 
 
 def historical_day_bounds(date_str):
@@ -77,7 +78,7 @@ def map_strict_historical_day(date_str,resolution_min,raw_prices):
         prices.append(price)
         timestamps.append(left.astimezone(zone).isoformat())
     return dict(date=date_str,timezone='Europe/Vienna',resolution_min=resolution_min,
-                timestamps=timestamps,market_prices=prices,source='aWATTar Austria',coverage='complete',
+                timestamps=timestamps,market_prices=prices,source='; '.join(sorted({row.get('provenance',{}).get('attribution','Unspecified historical source') for row in raw_prices})),coverage='complete',
                 source_intervals=[dict(start_utc=a.isoformat(),end_utc=b.isoformat(),price_eur_mwh=p) for a,b,p in intervals])
 
 class PriceProvider(ABC):
@@ -127,9 +128,14 @@ class AWattarProvider(PriceProvider):
                                 "price_eur_mwh": float(item["marketprice"])
                             })
                     else:
-                        print(f"aWATTar Error: Status {response.status_code} for chunk starting {chunk_start}")
-                except Exception as e:
-                    print(f"Chunk fetch error for {chunk_start}: {e}")
+                        raise PriceDataError('HTTP_429' if response.status_code==429 else 'UPSTREAM_UNAVAILABLE',f'aWATTar returned HTTP {response.status_code}; Retry-After: {response.headers.get("Retry-After")}. No other source was selected.')
+                except httpx.TimeoutException as error:
+                    raise PriceDataError('UPSTREAM_TIMEOUT','aWATTar request timed out. No other source was selected.') from error
+                except httpx.RequestError as error:
+                    raise PriceDataError('UPSTREAM_UNAVAILABLE',f'aWATTar request failed: {error}') from error
+                except (KeyError,TypeError,ValueError) as error:
+                    if isinstance(error,PriceDataError):raise
+                    raise PriceDataError('INVALID_RESPONSE','aWATTar returned invalid price data.') from error
                     
                 processed_hours += current_chunk_hours
         

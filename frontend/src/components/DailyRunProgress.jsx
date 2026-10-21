@@ -6,8 +6,12 @@ export default function DailyRunProgress({statuses,telemetry={},execution}) {
   if (!summary.total) return null;
   const {requested=2,capacity=1,used_workers=1,mode,fallback_reason}=execution || {};
   const title=mode==='retry' ? 'Retrying failed price days' : mode==='seed' ? 'Preparing reference day' : mode==='fallback' ? 'Serial fallback' : used_workers>1 ? 'Parallel daily optimization' : 'Daily optimization';
-  return <section className="daily-run-progress" aria-label="Daily optimization progress">
-    <div className="daily-run-heading"><h3>{title}</h3><span>{summary.completed} / {summary.total} days completed</span></div>
+  return <details className="daily-run-progress run-status-panel" aria-label="Daily optimization progress">
+    <summary className="run-status-summary">
+      <span className="run-status-title">{title}</span>
+      <span className="run-status-overview">{summary.completed} / {summary.total} days completed · {summary.active} active{summary.failed>0 ? ` · ${summary.failed} failed` : ''}</span>
+    </summary>
+    <div className="run-status-body">
     <progress className="daily-run-completion" max={summary.total} value={summary.completed+summary.skipped+summary.failed+summary.cancelled} aria-label="Processed days" />
     <div className="daily-run-metrics">
       <div><span>Active jobs</span><strong>{summary.active} / {mode==='seed' ? 1 : used_workers}</strong></div>
@@ -32,5 +36,6 @@ export default function DailyRunProgress({statuses,telemetry={},execution}) {
       </tr>)}
     </tbody></table></div>
     <p className="daily-run-note">Active jobs appear first. The bar counts processed dates, including skipped and failed dates; it is not the solver gap.</p>
-  </section>;
+    </div>
+  </details>;
 }

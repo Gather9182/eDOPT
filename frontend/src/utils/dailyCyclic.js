@@ -269,7 +269,7 @@ export async function retryDailyPriceFailures(run,options) {
       checkOptimizationCancelled(signal);
       onDayProgress({date,day_index:original.day_index,status:'running'});
       notify(`Daily Cyclic: ${date} — retrying historical prices.`);
-      prices=await fetchPrices(date,{signal});
+      prices=await fetchPrices(date,{signal,retry:true});
       checkOptimizationCancelled(signal);
       const n=1440/settings.time_resolution;
       if (prices.date!==date || prices.coverage!=='complete' || prices.market_prices?.length!==n || prices.timestamps?.length!==n) throw new Error(`${date}: incomplete or mismatched historical prices.`);
@@ -325,7 +325,8 @@ export function aggregateDailyRun(run) {
       continuity_scope:row.continuity_scope,continuity_note:row.continuity_note,exclusion:row.exclusion,
       retry_attempts:row.retry_attempts,attempt_history:row.attempt_history,retry_cancelled:row.retry_cancelled,
       solver_status:row.result?.status,optimality_proven:row.status==='completed' ? row.result.status.startsWith('Optimal') : null,
-      market_prices:row.prices?.market_prices,effective_prices:row.request?.electricity_prices,timestamps:row.prices?.timestamps})),
+      market_prices:row.prices?.market_prices,effective_prices:row.request?.electricity_prices,timestamps:row.prices?.timestamps,
+      price_aggregation:row.prices?.price_aggregation,price_source:row.prices?.source,price_license:row.prices?.license,price_snapshot_hash:row.prices?.snapshot_hash})),
     daily_results:good.map(row=>({date:row.date,day_index:row.day_index,request:row.request,prices:row.prices,result:row.result,attempt_history:row.attempt_history})),
     failed_attempts:run.records.filter(row=>row.status==='failed' || row.status==='cancelled'),
     total_cost_eur:sum(good.map(row=>row.reconciliation.cost_eur)),total_energy_mwh:sum(good.map(row=>row.reconciliation.charger_energy_mwh)),
