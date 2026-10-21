@@ -1,6 +1,6 @@
 import {flatRateQuotes} from '../utils/flatRate.js';
 import axios from 'axios';
-import {optimizationJob} from '../utils/optimizationProgress';
+import {optimizationJob,checkOptimizationCancelled} from '../utils/optimizationProgress';
 
 export const API_BASE = import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname}:8000/api`;
 
@@ -106,3 +106,18 @@ export default {
   getPricesForOptimization,
   exportExcel,
 };
+
+export const historicalWeatherDay=async(date,options,signal)=>(await api.get('/weather/day',{params:{date,...options},signal})).data;
+export const historicalWeatherCoverage=async(options,signal)=>(await api.get('/weather/coverage',{params:options,signal})).data;
+export async function prepareHistoricalWeather(options,{signal,onProgress=()=>{}}={}) {
+  try {
+  const {job_id}=(await api.post('/weather/prepare',options,{signal})).data;
+  for(;;) {
+    const state=(await api.get(`/weather/prepare/${job_id}`,{signal})).data;onProgress(state);
+    if(state.status==='completed') return state.result;
+    if(state.status==='failed') throw new Error(`${state.error.code}: ${state.error.message}`);
+    await new Promise(resolve=>setTimeout(resolve,700));
+    if(signal?.aborted) {const error=new Error('Weather preparation wait cancelled.');error.code='OPTIMIZATION_CANCELLED';throw error;}
+  }
+  } catch(error) {checkOptimizationCancelled(signal);throw error;}
+}

@@ -1732,3 +1732,13 @@ input[type="range"]::-webkit-slider-thumb:hover {
 .route-summary-download { min-width: 0; max-width: 680px; }
 .route-summary-download > details { max-width: 620px; overflow-wrap: anywhere; }
 .route-summary-download summary { cursor: pointer; }
+
+.running-status-panels > .historical-weather-panel { width: 100%; max-width: none; margin: 0; box-sizing: border-box; text-align: left; }
+
+.weather-load-status { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; margin-bottom: 16px; background: var(--bg-card, white); border: 1px solid var(--border); border-radius: 6px; font-size: 12px; line-height: 1.6; }
+.weather-load-status progress { width: 100%; height: 6px; accent-color: var(--primary); }
+.weather-missing-dates { max-height: 180px; overflow-y: auto; margin-top: 6px; font-variant-numeric: tabular-nums; }
+
+.historical-weather-panel { box-shadow: none; }
+.running-status-panels > .historical-weather-panel, .live-status-disclosure { background: var(--bg-surface); box-shadow: none; }
+.running-status-panels > .live-status-disclosure { width: 100%; max-width: none; margin: 0; box-sizing: border-box; text-align: left; }

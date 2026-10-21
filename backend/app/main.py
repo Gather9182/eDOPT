@@ -1,3 +1,4 @@
+from .services.historical_weather import HistoricalWeather,WeatherPreparationJobs
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from .models import OptimizationInputs, OptimizationResult
@@ -20,6 +21,7 @@ app = FastAPI(title="eDOPT Optimization API")
 from .services.optimization_progress import OptimizationJobs
 optimization_jobs = OptimizationJobs()
 price_jobs = PricePreparationJobs()
+weather_jobs = WeatherPreparationJobs()
 
 
 @app.on_event('startup')
@@ -81,6 +83,42 @@ app.add_middleware(
 @app.get("/api/health")
 async def health_check():
     return {"status": "online", "version": "1.1.0-milp"}
+
+
+class WeatherPreparationRequest(BaseModel):
+    model: str = 'era5'
+    first: str
+    last: str
+    latitude: float
+    longitude: float
+    resolution: int = 15
+    need_temperature: bool = False
+    refresh: bool = False
+
+
+@app.post('/api/weather/prepare',status_code=202)
+def prepare_weather(req: WeatherPreparationRequest):
+    try:return {'job_id':weather_jobs.start(req.model_dump())}
+    except PriceDataError as error:raise HTTPException(status_code=400,detail=f'{error.code}: {error}')
+
+
+@app.get('/api/weather/prepare/{job_id}')
+def weather_job_status(job_id: str):
+    try:return weather_jobs.get(job_id)
+    except KeyError:raise HTTPException(status_code=404,detail='Unknown weather preparation job.')
+
+
+@app.get('/api/weather/coverage')
+def weather_coverage(first: str,last: str,latitude: float,longitude: float,resolution: int=15,need_temperature: bool=False,model: str='era5'):
+    try:return HistoricalWeather().coverage(first,last,latitude,longitude,resolution,need_temperature,model)
+    except (ValueError,TypeError) as error:raise HTTPException(status_code=400,detail=str(error))
+
+
+@app.get('/api/weather/day')
+def weather_day(date: str,latitude: float,longitude: float,resolution: int=15,capacity_kw: float=0,performance_ratio: float=.85,need_temperature: bool=False,model: str='era5'):
+    try:return HistoricalWeather().day(date,latitude,longitude,resolution,capacity_kw,performance_ratio,need_temperature,model)
+    except PriceDataError as error:raise HTTPException(status_code=400,detail=f'{error.code}: {error}')
+    except (ValueError,TypeError) as error:raise HTTPException(status_code=400,detail=str(error))
 
 
 @app.get('/api/prices/historical-calendar')

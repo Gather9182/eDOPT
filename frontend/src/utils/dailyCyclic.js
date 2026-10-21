@@ -38,14 +38,38 @@ function blocked(site) {
   });
 }
 
-export function dailyConfigurationIssues(project,settings,scenario) {
+export function dailyConfigurationIssues(project,settings,scenario,bessConfig=project.constraints?.bess_config) {
   const messages=[];
-  if (scenario!=='baseline') messages.push('Daily Cyclic currently supports Baseline only. Select it explicitly; your scenario has not been changed.');
+  if (!['baseline','pv','bess','pv_bess'].includes(scenario)) messages.push('Daily Cyclic requires a single scenario; Compare All is not supported.');
+  if (['bess','pv_bess'].includes(scenario) && bessConfig?.enable_temperature_capacity_derating) messages.push('Daily Cyclic BESS requires temperature derating to be explicitly disabled. Thermal midnight continuity is not modeled; use Flexible mode to inherit temperature.');
   if (!Number.isInteger(settings.time_resolution) || 1440%settings.time_resolution) messages.push('Daily Cyclic requires a resolution dividing 1440 minutes exactly.');
   for (const bus of project.buses || []) for (const visit of bus.opportunity_visits || []) {
     if (visit.pause_start_min<0 || visit.pause_end_min>1440) messages.push(`Route ${bus.id}: optional charging visits crossing midnight are not supported in Daily Cyclic. Use Flexible Long-Term; no options were removed.`);
   }
   return messages.map(message=>({type:'ERROR',category:'data',code:'DAILY_CYCLIC_CONFIGURATION',message}));
+}
+
+async function buildDailyRequest(options,date,prices,overrides={},signal,retry=false) {
+  const {project,settings,buses,scenario='baseline',pvConfig=null,bessConfig=null,fetchWeather}=options;
+  let weather=null;
+  const pv=['pv','pv_bess'].includes(scenario),storage=['bess','pv_bess'].includes(scenario);
+  const n=1440/settings.time_resolution;
+  if(pv) {
+    if(Number(pvConfig?.capacity_kw)===0) weather={date,coverage:'complete',pv_profile_kw:Array(n).fill(0),pv_model:{version:'zero-capacity',capacity_kw:0},source:'Configured zero PV capacity; no weather required'};
+    else {
+      if(!fetchWeather) throw new Error('Daily PV requires prepared historical weather profiles.');
+      try {weather=await fetchWeather(date,{signal,retry});}
+      catch(error) {checkOptimizationCancelled(signal);throw error;}
+      checkOptimizationCancelled(signal);
+      if(weather?.date!==date || weather.coverage!=='complete' || weather.pv_profile_kw?.length!==n || !weather.pv_profile_kw.every(value=>Number.isFinite(value) && value>=0)) throw new Error(`${date}: incomplete historical PV profile. No replacement PV was used.`);
+    }
+  }
+  const request=buildSolverInputs(project,settings,{buses,hours:24,scenario,daily:true,cyclicConnections:true,
+    marketPrices:prices.market_prices,prices:effectivePrices(prices.market_prices,project.meta?.price_assumptions),
+    pvConfig:pv ? {...pvConfig,reference_date:date,profile_kw:weather.pv_profile_kw,profile_kwh:null} : null,
+    bessConfig:storage ? bessConfig : null,...overrides});
+  if(weather) request.weather_evidence=weather;
+  return request;
 }
 
 export function verifyDailyResult(request,result,previous=null,configuredInitial=null) {
@@ -56,7 +80,7 @@ export function verifyDailyResult(request,result,previous=null,configuredInitial
   if (result.grid_import_profile?.length!==n || result.aggregated_load_profile?.length!==n) throw new Error('Incomplete daily fleet profiles.');
   const cost=sum(result.grid_import_profile.map((power,t)=>power*dt*request.electricity_prices[t]/1000));
   const energy=sum(result.aggregated_load_profile)*dt/1000;
-  if (!close(cost,result.total_cost_eur,Math.max(.02,Math.abs(cost)*1e-5)) || !close(energy,result.total_energy_mwh,.000002)) throw new Error('Daily cost or energy reconciliation failed.');
+  if (!close(cost,result.total_cost_eur,Math.max(.02,Math.abs(cost)*1e-5)) || !close(request.scenario==='baseline' ? energy : sum(result.grid_import_profile)*dt/1000,result.total_energy_mwh,.000002)) throw new Error('Daily cost or energy reconciliation failed.');
   const proofs=[];
   for (const bus of request.buses) {
     const soc=result.soc_profiles?.[bus.id];
@@ -83,10 +107,35 @@ export function verifyDailyResult(request,result,previous=null,configuredInitial
       previous_final_connection:previous?.final_connections?.[bus.id] ?? inherited,final_connection:result.final_connections?.[bus.id] ?? '',compliant:true});
   }
   if (Object.keys(result.schedules || {}).sort().join('|')!==[...ids].sort().join('|')) throw new Error('The daily result fleet differs from the requested fleet. No routes may be silently excluded.');
-  return {cost_eur:cost,charger_energy_mwh:energy,grid_energy_kwh:sum(result.grid_import_profile)*dt,proofs};
+  let bessProof=null;
+  if(request.scenario!=='baseline') {
+    const fields=['grid_to_bus_profile','pv_to_bus_profile','bess_to_bus_profile','bess_charge_from_grid_profile','bess_charge_from_pv_profile','bess_charge_profile','bess_discharge_profile','pv_used_profile','pv_curtailed_profile','pv_yield_profile'];
+    for(const field of fields) if(result[field]?.length!==n || !result[field].every(value=>Number.isFinite(value) && value>=-.001)) throw new Error(`Incomplete or invalid daily energy profile: ${field}.`);
+    for(let t=0;t<n;t++) {
+      if(!close(result.aggregated_load_profile[t],result.grid_to_bus_profile[t]+result.pv_to_bus_profile[t]+result.bess_to_bus_profile[t],.02)
+        || !close(result.grid_import_profile[t],result.grid_to_bus_profile[t]+result.bess_charge_from_grid_profile[t],.02)
+        || !close(result.pv_yield_profile[t],result.pv_used_profile[t]+result.pv_curtailed_profile[t],.02)
+        || !close(result.pv_used_profile[t],result.pv_to_bus_profile[t]+result.bess_charge_from_pv_profile[t],.02)
+        || ['pv','pv_bess'].includes(request.scenario) && request.pv_config?.profile_kw && !close(result.pv_yield_profile[t],request.pv_config.profile_kw[t],.02)
+        || !close(result.bess_charge_profile[t],result.bess_charge_from_grid_profile[t]+result.bess_charge_from_pv_profile[t],.02)
+        || !close(result.bess_discharge_profile[t],result.bess_to_bus_profile[t],.02)) throw new Error(`Daily PV/BESS power balance failed at period ${t}.`);
+    }
+  }
+  if(['bess','pv_bess'].includes(request.scenario)) {
+    const config=request.bess_config,states=result.bess_soc_profile;
+    if(!config || states?.length!==n+1 || !close(states[0],config.initial_soc_kwh) || !close(states.at(-1),config.initial_soc_kwh)) throw new Error('Daily BESS Start SoC = End SoC proof failed.');
+    for(let t=0;t<=n;t++) {
+      if(!Number.isFinite(states[t]) || states[t]<config.min_soc_kwh-.001 || states[t]>config.max_soc_kwh+.001) throw new Error('Daily BESS state violates configured bounds.');
+      if(t<n && (result.bess_charge_profile[t]>config.max_charge_power_kw+.02 || result.bess_discharge_profile[t]>config.max_discharge_power_kw+.02 || Math.min(result.bess_charge_profile[t],result.bess_discharge_profile[t])>.001)) throw new Error('Daily BESS power or charge/discharge exclusion violated.');
+      if(t<n && !close(states[t+1],states[t]+result.bess_charge_profile[t]*dt*config.efficiency-result.bess_discharge_profile[t]*dt/config.efficiency,Math.max(.002,.0002+dt*.00005/config.efficiency))) throw new Error('Daily BESS energy dynamics do not reconcile.');
+    }
+    bessProof={initial_energy_kwh:states[0],final_energy_kwh:states.at(-1),target_energy_kwh:config.initial_soc_kwh,compliant:true};
+  }
+  return {cost_eur:cost,charger_energy_mwh:energy,grid_energy_kwh:sum(result.grid_import_profile)*dt,proofs,bess_proof:bessProof};
 }
 
-async function runSerialDailyCyclic({project,settings,buses,dates,fetchPrices,optimize,checkpoint,notify=()=>{},onDayProgress=()=>{},signal,excludedDates=[]}) {
+async function runSerialDailyCyclic(options) {
+  const {project,settings,buses,dates,fetchPrices,optimize,checkpoint,notify=()=>{},onDayProgress=()=>{},signal,excludedDates=[]}=options;
   const records=[];
   let previous=null,initialConnections,initialEnergies={};
   let firstError=null,newSegment=false;
@@ -102,8 +151,7 @@ async function runSerialDailyCyclic({project,settings,buses,dates,fetchPrices,op
       checkOptimizationCancelled(signal);
       const n=1440/settings.time_resolution;
       if (prices.date!==date || prices.coverage!=='complete' || prices.market_prices?.length!==n || prices.timestamps?.length!==n) throw new Error(`${date}: incomplete or mismatched historical prices.`);
-      request=buildSolverInputs(project,settings,{buses,hours:24,scenario:'baseline',daily:true,cyclicConnections:true,
-        marketPrices:prices.market_prices,prices:effectivePrices(prices.market_prices,project.meta?.price_assumptions),initialConnections,initialEnergies});
+      request=await buildDailyRequest(options,date,prices,{initialConnections,initialEnergies},signal);
       notify(`Daily Cyclic: day ${index+1}/${dates.length} (${date}) — optimizing.`);
       result=await optimize(request,{date,day_index:index,chunk_number:index+1,global_start_period:index*n,global_start_minute:index*1440},{signal});
       const reconciliation=verifyDailyResult(request,result,previous,configured);
@@ -139,13 +187,18 @@ async function runDailyCyclicOnce(options) {
   const {project,settings,buses,dates,fetchPrices,optimize,checkpoint,notify=()=>{},onDayProgress=()=>{},onExecution=()=>{},signal,concurrency=2,excludedDates=[]}=options;
   const workers=Number.isInteger(concurrency) ? Math.max(1,Math.min(4,concurrency)) : 1;
   const serial=async(reason,seedFailure)=>{
-    onExecution({used_workers:1,mode:reason ? 'fallback' : 'serial',fallback_reason:reason || null});
+    onExecution({used_workers:1,mode:reason ? 'fallback' : 'serial',fallback_reason:reason || null,seed_failure:seedFailure || null});
     if (reason) notify(`Daily Cyclic: serial fallback — ${reason}`);
     const run=await runSerialDailyCyclic(options);
     return {...run,execution:{requested_workers:workers,used_workers:1,fallback_reason:reason || null,seed_failure:seedFailure || null}};
   };
   if (workers===1 || dates.length<2) return serial();
-  const template=buildSolverInputs(project,settings,{buses,hours:24,scenario:'baseline',daily:true,cyclicConnections:true});
+  const scenario=options.scenario || 'baseline';
+  // The UI retains both configurations when scenarios change. Only active
+  // technologies belong to the proof, exactly as in each actual day request.
+  const template=buildSolverInputs(project,settings,{buses,hours:24,scenario,
+    pvConfig:['pv','pv_bess'].includes(scenario) ? options.pvConfig : null,
+    bessConfig:['bess','pv_bess'].includes(scenario) ? options.bessConfig : null,daily:true,cyclicConnections:true});
   const eligibility=dailyBoundaryEligibility(template);
   if (eligibility.reason) return serial(eligibility.reason);
   const configured=Object.fromEntries(template.buses.map(bus=>[bus.id,bus.initial_soc_kwh]));
@@ -172,8 +225,7 @@ async function runDailyCyclicOnce(options) {
       checkOptimizationCancelled(pool.signal);
       const n=1440/settings.time_resolution;
       if (prices.date!==date || prices.coverage!=='complete' || prices.market_prices?.length!==n || prices.timestamps?.length!==n) throw new Error(`${date}: incomplete or mismatched historical prices.`);
-      request=buildSolverInputs(project,settings,{buses,hours:24,scenario:'baseline',daily:true,cyclicConnections:true,
-        marketPrices:prices.market_prices,prices:effectivePrices(prices.market_prices,project.meta?.price_assumptions)});
+      request=await buildDailyRequest(options,date,prices,{},pool.signal);
       if (dailyPhysicalKey(request)!==dailyPhysicalKey(template)) throw new Error('Daily physical inputs changed. Independent-day proof is invalid.');
       request={...request,...(seed ? {daily_boundary_seed:true} : {daily_connection_boundary:boundary})};
       notify(`Daily Cyclic: ${date} — ${seed ? 'proving repeatable midnight seed' : 'optimizing independent day'}.`);
@@ -188,7 +240,7 @@ async function runDailyCyclicOnce(options) {
       return true;
     } catch (error) {
       if (seed && request && !result && error.code!=='OPTIMIZATION_CANCELLED') {
-        execution.seed_failure={detail:error.message,diagnostics:error.response?.data?.diagnostics || null};
+        execution.seed_failure={detail:typeof error.response?.data?.detail==='string' ? error.response.data.detail : error.response?.data?.detail ? JSON.stringify(error.response.data.detail) : error.message,code:error.code || null,http_status:error.response?.status || null,diagnostics:error.response?.data?.diagnostics || null};
         return false;
       }
       const failure={date,day_index:index,status:dayFailureStatus(error),exclusion:error.exclusion,request,prices,solver_result:result,
@@ -208,7 +260,7 @@ async function runDailyCyclicOnce(options) {
       execution.seed_date=dates[seedIndex];
       onExecution({used_workers:workers,mode:'seed',seed_date:execution.seed_date});
       seedReady=await day(seedIndex,true);
-      if (!seedReady && execution.seed_failure) return await serial('The seed did not prove an independent repeatable midnight state.',execution.seed_failure);
+      if (!seedReady && execution.seed_failure) return await serial(`Reference day ${execution.seed_date} (seed) could not prove an independent repeatable midnight state.`,execution.seed_failure);
       if (!seedReady) seedIndex++;
     }
     next=seedIndex+1;
@@ -257,7 +309,7 @@ export async function retryDailyPriceFailures(run,options) {
   if (!candidates.length) return run;
   const configured=Object.fromEntries(buildSolverInputs(project,settings,{buses,hours:24,daily:true}).buses.map(bus=>[bus.id,bus.initial_soc_kwh]));
   onExecution({mode:'retry',used_workers:1,retry_total:candidates.length,retry_completed:0});
-  notify(`Daily Cyclic: all dates attempted. Retrying historical-price failures once, sequentially (${candidates.length} dates).`);
+  notify(`Daily Cyclic: all dates attempted. Retrying historical input failures once, sequentially (${candidates.length} dates).`);
   let recovered=0,attempted=0,cancelled=false;
   for (const original of candidates) {
     if (signal?.aborted) {cancelled=true;break;}
@@ -269,14 +321,12 @@ export async function retryDailyPriceFailures(run,options) {
     try {
       checkOptimizationCancelled(signal);
       onDayProgress({date,day_index:original.day_index,status:'running'});
-      notify(`Daily Cyclic: ${date} — retrying historical prices.`);
+      notify(`Daily Cyclic: ${date} — retrying historical inputs.`);
       prices=await fetchPrices(date,{signal,retry:true});
       checkOptimizationCancelled(signal);
       const n=1440/settings.time_resolution;
       if (prices.date!==date || prices.coverage!=='complete' || prices.market_prices?.length!==n || prices.timestamps?.length!==n) throw new Error(`${date}: incomplete or mismatched historical prices.`);
-      request=buildSolverInputs(project,settings,{buses,hours:24,scenario:'baseline',daily:true,cyclicConnections:true,
-        marketPrices:prices.market_prices,prices:effectivePrices(prices.market_prices,project.meta?.price_assumptions),
-        initialConnections:previous?.final_connections,initialEnergies:previous ? Object.fromEntries(buses.map(bus=>[bus.id,previous.soc_profiles[bus.id].at(-1)])) : undefined});
+      request=await buildDailyRequest(options,date,prices,{initialConnections:previous?.final_connections,initialEnergies:previous ? Object.fromEntries(buses.map(bus=>[bus.id,previous.soc_profiles[bus.id].at(-1)])) : undefined},signal,true);
       if (run.execution?.boundary) request.daily_connection_boundary=run.execution.boundary;
       result=await optimize(request,{date,day_index:original.day_index,chunk_number:original.day_index+1,
         global_start_period:original.day_index*n,global_start_minute:original.day_index*1440,retry_attempt:1},{signal});
@@ -317,7 +367,7 @@ export function aggregateDailyRun(run) {
   const good=run.records.filter(row=>row.status==='completed').sort((a,b)=>a.day_index-b.day_index);
   if (!good.length) return null;
   const results=good.map(row=>row.result),first=results[0];
-  const payload={...mergeFlatRateResults(results),scenario:'baseline',is_long_term:true,total_days:good.length,requested_days:run.dates.length,run_status:run.status,
+  const payload={...mergeFlatRateResults(results),scenario:first.scenario || 'baseline',is_long_term:true,total_days:good.length,requested_days:run.dates.length,run_status:run.status,
     long_term_mode:'daily_cyclic',timetable_scope:'The same configured daily timetable is repeated on every date. No weekend/holiday timetable or global multi-day optimum.',
     daily_execution:run.execution,completed_dates:good.map(row=>row.date),completed_day_indices:good.map(row=>row.day_index),
     dst_policy:'skip',skipped_dates:run.records.filter(row=>row.status==='skipped').map(row=>({date:row.date,...row.exclusion})),
@@ -330,17 +380,19 @@ export function aggregateDailyRun(run) {
       price_aggregation:row.prices?.price_aggregation,price_source:row.prices?.source,price_license:row.prices?.license,price_snapshot_hash:row.prices?.snapshot_hash})),
     daily_results:good.map(row=>({date:row.date,day_index:row.day_index,request:row.request,prices:row.prices,result:row.result,attempt_history:row.attempt_history})),
     failed_attempts:run.records.filter(row=>row.status==='failed' || row.status==='cancelled'),
-    total_cost_eur:sum(good.map(row=>row.reconciliation.cost_eur)),total_energy_mwh:sum(good.map(row=>row.reconciliation.charger_energy_mwh)),
-    peak_load_kw:Math.max(...results.map(result=>Math.max(...result.aggregated_load_profile))),
+    total_cost_eur:sum(good.map(row=>row.reconciliation.cost_eur)),total_energy_mwh:sum(good.map(row=>row.reconciliation.grid_energy_kwh))/1000,total_bus_charging_energy_mwh:sum(good.map(row=>row.reconciliation.charger_energy_mwh)),
+    peak_load_kw:Math.max(...results.map(result=>Math.max(...(result.grid_import_profile || result.aggregated_load_profile)))),
     schedules_by_day:results.map(result=>result.schedules),soc_profiles_by_day:results.map(result=>result.soc_profiles),diagnostics_by_day:results.map(result=>result.bus_diagnostics),
     final_connections:results.at(-1).final_connections,charging_curve:first.charging_curve,
     baseline_feasible:results.every(result=>result.baseline_feasible===true),baseline_issues:[...new Set(results.flatMap(result=>result.baseline_issues || []))],
     baseline_cost_eur:results.every(result=>result.baseline_feasible===true && Number.isFinite(result.baseline_cost_eur)) ? sum(results.map(result=>result.baseline_cost_eur)) : null,
-    basic_optimized_cost_eur:null,soc_policy:mergeSocPolicies(results.map((result,day)=>result.soc_policy?.min_mode ? {...result.soc_policy,
+    bess_cycles:good.filter(row=>row.reconciliation.bess_proof).map(row=>({date:row.date,...row.reconciliation.bess_proof})),
+    basic_optimized_cost_eur:results.every(result=>Number.isFinite(result.basic_optimized_cost_eur)) ? sum(results.map(result=>result.basic_optimized_cost_eur)) : null,soc_policy:mergeSocPolicies(results.map((result,day)=>result.soc_policy?.min_mode ? {...result.soc_policy,
       violations:(result.soc_policy.violations || []).map(row=>({...row,minute:row.minute+day*1440,calendar_minute:row.minute+good[day].day_index*1440,date:good[day].date,day_index:good[day].day_index}))} : null).filter(Boolean)),
-    end_condition:{mode:'cyclic_soc',daily:true,tolerance_kwh:.001,buses:good.flatMap(row=>row.reconciliation.proofs.map(proof=>({...proof,date:row.date,day_index:row.day_index,target_soc_kwh:proof.initial_soc_kwh})))}};
+    end_condition:{mode:'cyclic_soc',daily:true,bess_cyclic_enabled:['bess','pv_bess'].includes(first.scenario),tolerance_kwh:.001,buses:good.flatMap(row=>row.reconciliation.proofs.map(proof=>({...proof,date:row.date,day_index:row.day_index,target_soc_kwh:proof.initial_soc_kwh})))}};
   for (const field of ['aggregated_load_profile','grid_import_profile','baseline_aggregated_load_profile','electricity_prices','market_prices']) payload[field]=results.flatMap(result=>result[field] || []);
   for (const field of ['bess_charge_profile','bess_discharge_profile','bess_soc_profile','pv_yield_profile','pv_used_profile','pv_curtailed_profile','pv_to_bus_profile','grid_to_bus_profile','bess_to_bus_profile','bess_charge_from_pv_profile','bess_charge_from_grid_profile','ambient_temperature_profile_c','bess_cell_temperature_profile_c','bess_capacity_factor_profile','bess_max_usable_capacity_profile_kwh']) payload[field]=results.flatMap(result=>result[field] || []);
+  for (const field of ['bess_soc_profile','bess_cell_temperature_profile_c']) payload[field]=results.flatMap((result,i)=>i ? (result[field] || []).slice(1) : result[field] || []);
   for (const field of ['total_pv_generated_kwh','total_pv_used_kwh','total_pv_curtailed_kwh','total_bess_throughput_kwh']) payload[field]=sum(results.map(result=>result[field] || 0));
   for (const field of ['connection_schedules','site_load_profiles','site_grid_import_profiles','site_occupied_connectors','additional_trip_energy_profiles']) {
     payload[field]={};

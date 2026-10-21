@@ -37,7 +37,8 @@ export function seedConnectionBoundary(pairs,result) {
 
 export function dailyPhysicalKey(request) {
   const physical={...request};
-  for (const key of ['electricity_prices','market_prices','daily_boundary_seed','daily_connection_boundary']) delete physical[key];
+  for (const key of ['electricity_prices','market_prices','daily_boundary_seed','daily_connection_boundary','weather_evidence']) delete physical[key];
+  if(physical.pv_config) {physical.pv_config={...physical.pv_config};for(const key of ['profile_kw','profile_kwh','reference_date']) delete physical.pv_config[key];}
   return JSON.stringify(physical);
 }
 

@@ -1,3 +1,4 @@
+import ResultInfoCard from '../components/ResultInfoCard';
 import RouteSummaryExportButton from '../components/RouteSummaryExportButton';
 import FlatRateResults from '../components/FlatRateResults';
 import React, { useState, useEffect, useMemo } from 'react';
@@ -938,7 +939,7 @@ const DailyEnergyMixCard = ({
         <div className="modal-overlay" style={{ zIndex: 2400 }} onClick={() => toggleFullscreen(null)} />
       )}
       <div ref={cardRef} className={`card shadow-sm border-l-4 border-l-primary ${fullscreenChart === 'energyMix' ? 'expanded' : ''}`} style={{ position: 'relative' }}>
-          <div className="flex justify-between items-center mb-6" style={{ position: 'relative', zIndex: 10 }}>
+          <div className="flex justify-between items-center mb-6" style={{ position: 'relative', zIndex: 10, flexWrap:'wrap', gap:16 }}>
               <div>
                   <h3 className="card-title text-primary flex items-center gap-2">
                      <GitCompare size={18} /> Daily Energy Mix & Source Attribution
@@ -949,7 +950,7 @@ const DailyEnergyMixCard = ({
                   </h3>
                   <p className="card-description">Daily source attribution for total fleet demand. Drag the brush below to zoom synchronously.</p>
               </div>
-              <div className="flex items-center gap-6">
+              <div className="flex items-center gap-6" style={{flexWrap:'wrap'}}>
                   {isZoomed && (
                       <button 
                           onClick={handleResetZoom}
@@ -1142,7 +1143,7 @@ const DailyEnergyMixCard = ({
             ) : (
                 <ResponsiveContainer>
                     <ComposedChart 
-                        data={zoomedData} 
+                        data={zoomedData}
                         style={{ cursor: 'pointer' }}
                         onClick={(state) => {
                             if (state && state.activeTooltipIndex !== undefined) {
@@ -1182,7 +1183,7 @@ const DailyEnergyMixCard = ({
                         <Tooltip 
                             cursor={{fill: 'var(--primary)', opacity: 0.05}}
                             contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: 'var(--shadow-lg)' }}
-                            formatter={(val, name) => [`${Math.round(val)} kWh`, name.replace('Kwh', ' (kWh)')]}
+                            formatter={(val, name) => [`${Math.round(val)} kWh`, String(name).replace('Kwh', '')]}
                             labelFormatter={tooltipLabelFormatter}
                         />
                         {sourcesVisible.grid && (
@@ -1235,8 +1236,8 @@ const DailyEnergyMixCard = ({
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '10px' }}>
           <ChartDownloadMenu 
-            title="Daily Energy Mix" 
-            data={zoomedData} 
+            title="Daily Energy Mix"
+            data={zoomedData}
             columns={[
               { key: 'gridKwh', label: 'Grid Import (kWh)' },
               ...(hasPv ? [{ key: 'pvUsedKwh', label: 'PV Direct (kWh)' }] : []),
@@ -2580,6 +2581,10 @@ const Results = () => {
         <RouteSummaryExportButton results={results} />
         <button className="btn btn-primary" disabled title="PDF reporting is currently disabled">Report PDF</button>
       </div>}
+      <ResultInfoCard title="Analysis details & checks"
+        summary={`${results.is_long_term ? `${results.total_days}/${results.requested_days || results.total_days} days evaluated · ` : ''}Charging locations · SoC limits · battery checks · price assumptions${!arrivalReference.comparable ? ' · Arrival comparison unavailable' : ''}`}
+        status={results.long_term_mode==='daily_cyclic' && results.run_status!=='completed' ? 'Partial results' : 'Show details'}
+        tone={results.long_term_mode==='daily_cyclic' && results.run_status!=='completed' ? 'warning' : undefined}>
       <ExcludedRoutesNotice ids={results.run_metadata?.excluded_bus_ids} reasons={results.run_metadata?.excluded_bus_reasons} />
       <DailyCyclicSummary results={results} />
       <FlatRateResults results={results} />
@@ -2588,6 +2593,7 @@ const Results = () => {
       <EndConditionResults condition={results.end_condition} />
       <ChargingCurveResults curve={results.charging_curve || results.run_metadata?.inputs?.charging_curve} />
       {!arrivalReference.comparable && <p role="status" className="card p-4 mb-4 text-warning">Savings: n.a. {arrivalReference.reason} {results.baseline_issues?.slice(0,3).join(' ')}</p>}
+      </ResultInfoCard>
       {results.storage_pruned && (
         <div className="bg-warning/10 border border-warning/20 rounded-2xl p-4 mb-8 animate-in slide-in-from-top-2 duration-500">
           <div className="flex items-start gap-3">

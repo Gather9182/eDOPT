@@ -80,11 +80,14 @@ export async function resultAnalysisFiles(results, currentProject, getItem, envi
       ...results.flat_rate_comparison,main_analysis_cost_eur:results.total_cost_eur,evaluated_days:results.total_days ?? null}])});
   }
   if (results.long_term_mode === 'daily_cyclic') {
+    files.push({name:'run/days/weather_preparation.json',data:json(results.historical_weather_preparation || null)});
+    files.push({name:'tables/daily_bess_cycles.csv',data:objectCsv(results.bess_cycles || [])});
     files.push({name:'run/days/price_preparation.json',data:json(results.historical_price_preparation || null)});
     files.push({name:'run/days/status.json',data:json({status:results.run_status,scope:results.timetable_scope,execution:results.daily_execution,dst_policy:results.dst_policy,skipped_dates:results.skipped_dates || [],completed_dates:results.completed_dates,completed_day_indices:results.completed_day_indices,days:results.day_records,failed_attempts:results.failed_attempts || []})});
     for (const [index,day] of (results.daily_results || []).entries()) {
       if(index%8===0) onProgress({phase:'daily',message:'Writing daily evidence',completed:index,total:results.daily_results.length});
       const prefix=`run/days/day_${String(index+1).padStart(5,'0')}`;
+      files.push({name:`${prefix}/weather.json`,data:json(day.request?.weather_evidence || day.result?.weather_evidence || null)});
       files.push({name:`${prefix}/request.json`,data:json(day.request)},{name:`${prefix}/prices.json`,data:json(day.prices)},
         {name:`${prefix}/attempt_history.json`,data:json(day.attempt_history || [])},
         {name:`${prefix}/result.json`,data:json(day.result)},{name:`${prefix}/date.json`,data:json({date:day.date,day_index:day.day_index})});

@@ -84,11 +84,14 @@ class BusUmlauf(BaseModel):
     opportunity_period_minutes: int = Field(1440, gt=0)
 
 class PVConfig(BaseModel):
+    profile_kw: Optional[List[float]] = Field(None, description="Explicit grid-average PV power in kW; preferred over legacy profile_kwh")
+    performance_ratio: float = Field(.85, gt=0, le=1, allow_inf_nan=False)
     capacity_kw: float = Field(0.0, description="Installed PV capacity")
     profile_kwh: Optional[List[float]] = Field(None, description="Optional custom PV generation profile")
     allow_curtailment: bool = Field(True, description="Whether to allow excess PV to be curtailed")
     
     # New fields for realistic weather calculation
+    weather_model: Literal["era5", "ecmwf_ifs"] = "era5"
     profile_mode: str = Field("bell_curve", description="Profile generation mode: bell_curve or open_meteo")
     latitude: Optional[float] = Field(None, description="Latitude for Open-Meteo locale")
     longitude: Optional[float] = Field(None, description="Longitude for Open-Meteo locale")
@@ -156,6 +159,7 @@ class OptimizationInputs(BaseModel):
     num_chargers: int = Field(50, description="Number of simultaneous charging sockets available (S_max)")
     use_next_day_readiness: bool = Field(False, description="Enforce final SoC enough for next day's first trips")
     use_cyclic_soc: bool = Field(False, description="Require each bus to end the repeated 24-hour day at its initial battery energy")
+    weather_evidence: Dict = Field(default_factory=dict)
     daily_cyclic: bool = False
     daily_boundary_seed: bool = False
     daily_connection_boundary: Dict[str, Dict[str, Literal[0, 1]]] = Field(default_factory=dict)
@@ -184,8 +188,18 @@ class OptimizationInputs(BaseModel):
             raise ValueError('Independent daily connection boundaries require Daily Cyclic.')
         if self.daily_boundary_seed and self.daily_connection_boundary:
             raise ValueError('Choose a seed or fixed daily connection boundaries, not both.')
-        if self.daily_cyclic and (self.scenario != 'baseline' or not self.use_cyclic_soc):
-            raise ValueError('Daily Cyclic supports Baseline with the daily cyclic bus SoC condition enabled.')
+        if self.daily_cyclic:
+            if self.scenario not in ('baseline','pv','bess','pv_bess') or not self.use_cyclic_soc:
+                raise ValueError('Daily Cyclic requires a single supported scenario and cyclic bus SoC.')
+            if self.scenario in ('bess','pv_bess'):
+                config=self.bess_config
+                if config is None:
+                    raise ValueError('Daily Cyclic BESS requires an explicit storage configuration.')
+                if config.enable_temperature_capacity_derating:
+                    raise ValueError('Daily Cyclic BESS temperature derating is not supported: thermal midnight continuity is not yet modeled. Use Flexible mode or explicitly disable derating.')
+                values=[config.capacity_kwh,config.initial_soc_kwh,config.min_soc_kwh,config.max_soc_kwh,config.max_charge_power_kw,config.max_discharge_power_kw,config.efficiency]
+                if not all(math.isfinite(value) for value in values) or not 0<=config.min_soc_kwh<=config.initial_soc_kwh<=config.max_soc_kwh<=config.capacity_kwh or min(config.max_charge_power_kw,config.max_discharge_power_kw)<0 or not 0<config.efficiency<=1:
+                    raise ValueError('Invalid Daily Cyclic BESS bounds, power or efficiency.')
         if self.use_cyclic_soc:
             if self.use_next_day_readiness:
                 raise ValueError('Start SoC = End SoC and Next-Day Readiness are alternative modes and cannot both be enabled.')
@@ -225,6 +239,8 @@ class BusDiagnostic(BaseModel):
     diagnostic_reason: str
 
 class OptimizationResult(BaseModel):
+    weather_evidence: Dict = Field(default_factory=dict)
+    bess_cycle: Dict = Field(default_factory=dict)
     price_assumption: Dict = Field(default_factory=dict)
     flat_rate_comparison: Dict = Field(default_factory=dict)
     charging_curve: Dict = Field(default_factory=dict)

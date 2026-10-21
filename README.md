@@ -19,8 +19,9 @@ A web-based research prototype for analyzing electricity procurement and chargin
 [![License](https://img.shields.io/badge/License-Non--Commercial-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-green.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688.svg)](https://fastapi.tiangolo.com/)
-[![React](https://img.shields.io/badge/React-18.2-61DAFB.svg)](https://reactjs.org/)
-[![Vite](https://img.shields.io/badge/Vite-5.0-646CFF.svg)](https://vitejs.dev/)
+[![React](https://img.shields.io/badge/React-19-61DAFB.svg)](https://reactjs.org/)
+[![Vite](https://img.shields.io/badge/Vite-8-646CFF.svg)](https://vitejs.dev/)
+[![SMARD](https://img.shields.io/badge/Prices-SMARD%20AT-orange.svg)](https://www.smard.de/)
 [![aWATTar API](https://img.shields.io/badge/API-aWATTar%20Market-orange.svg)](https://www.awattar.at/)
 [![Open-Meteo API](https://img.shields.io/badge/API-Open--Meteo%20Weather-skyblue.svg)](https://open-meteo.com/)
 [![PuLP Solver](https://img.shields.io/badge/Solver-PuLP%20MILP-purple.svg)](https://coin-or.github.io/pulp/)
@@ -69,13 +70,99 @@ The tool is **not** a real-time charging controller. It does not communicate wit
 | :--- | :--- |
 | **MILP optimization** | Uses PuLP and CBC to allocate charging power across buses and time periods under the configured constraints. |
 | **Vehicle circulation processing** | Converts compatible vehicle circulation plans into bus-specific availability windows and trip-energy profiles. |
-| **Electricity price inputs** | Supports time-varying Austrian electricity price data, fixed prices, and additional variable price components. |
+| **Electricity price inputs** | SMARD AT with persistent cache by default, explicit aWATTar selection, 15/30/60-minute averaging, configurable fees/taxes and flat-rate runs. |
 | **Bus-level constraints** | Represents battery capacity, state of charge, charging efficiency, maximum charging power, scheduled energy consumption, and readiness requirements. |
-| **Depot-level constraints** | Represents charging socket availability, aggregate charger capacity, and the depot grid connection limit. |
-| **PV and BESS scenarios** | Extends the depot energy balance with photovoltaic generation, stationary storage, curtailment, and storage operation. |
-| **Result visualization** | Displays charging profiles, state-of-charge trajectories, electricity prices, costs, grid imports, and scenario-specific energy flows. |
+| **Charging locations** | Per-site connector counts, charger ratings, aggregate charging limits, grid limits and switching windows; buses can arrive and connect to a free socket during a switching lock. |
+| **PV and BESS scenarios** | Baseline, PV, BESS and PV+BESS scenarios, including independent Daily Cyclic analysis with cached historical weather and hard daily BESS energy equality. |
+| **Long-term analysis** | Flexible chunk simulation or independent Daily Cyclic jobs, bounded parallelism, cancellation, configurable solver time limits and retained partial results. |
+| **Result visualization** | Charging, SoC, costs and source flows; daily energy mix in absolute kWh, synchronized zoom and source visibility controls. Diagnostic cards are grouped in a collapsed Analysis details & checks panel. |
 | **Scenario comparison** | Compares reference and optimized configurations using common operational input data. |
-| **Data export** | Exports schedules, time series, cost summaries, and scenario results to Excel or CSV where supported. |
+| **Data export** | Background ZIP/CSV exports with progress and cancellation; complete analysis evidence and long-term Route Summary CSV. PDF reporting is currently disabled. |
+
+---
+
+## Simulation Modes and Current Limits
+
+| Mode | Behavior |
+| :--- | :--- |
+| **Short-Term** | One configured horizon with the selected scenario and operating constraints. Daily Start SoC = End SoC applies to complete cyclic 24-hour runs. |
+| **Long-Term / Flexible** | Sequential chunks carrying bus energy and connection states into the next chunk. This is distinct from independent daily cycling. |
+| **Long-Term / Daily Cyclic** | One complete 24-hour solve per supported historical date, with the same daily timetable. Supports baseline, PV, BESS and PV+BESS; both date endpoints are included. |
+
+Daily Cyclic verifies a reference day before starting up to four concurrent day jobs. The effective
+worker count is limited by the selected count, backend CPU/available RAM, `EDOPT_DAILY_WORKERS`
+and the proof of repeatable necessary midnight connector states. It can fall back to serial execution
+for model continuity even when RAM is available; the reference-day error and measured capacity are
+shown separately. Inactive saved PV/BESS settings do not affect this proof. Solver time limits are
+configured under **Advanced Solver Settings**; changing worker count does not shorten a solve.
+Running optimizations can be cancelled.
+
+Each Daily Cyclic day enforces bus Start SoC = End SoC. When BESS is active, its final energy also
+equals its configured initial energy every day; no stationary-storage energy is carried between
+independent dates. Temperature-dependent BESS derating is currently blocked in this mode.
+Compare All, overnight optional charging visits and calendar-specific weekday/holiday timetable
+changes are not supported in Daily Cyclic. Independent daily solutions are not a global annual optimum.
+
+Europe/Vienna daylight-saving transition days (23/25 hours) are skipped and marked. Other failed
+dates retain their individual reasons while the remaining dates continue. Completed partial results
+open in Results; excluded dates contribute to no cost, energy, peak or comparison totals, and missing
+results are never replaced by zeros or extrapolated to a full year. An optional post-run retry targets
+remaining historical-input gaps; it does not silently relax infeasible solver constraints.
+
+### Prices and flat-rate comparisons
+
+The selected market source applies across simulation modes. SMARD AT is the default; aWATTar is
+an explicit alternative. Energy-Charts can be enabled for remaining historical gaps in the SMARD
+access path. Original source intervals and provenance are retained. A selectable 15/30/60-minute
+window forms duration-weighted spot-price averages; it does not change the solver time step or
+cached original prices. Incomplete coverage remains visible, with no repeated-day replacement.
+Future day-ahead prices may not yet be published.
+
+**Use flat rate for the main analysis** applies the entered EUR/kWh price to every time slot,
+with existing fees and taxes added. It requires no market-price download; all operating constraints
+remain active, and charging times may be non-unique. Alternatively, a market-price run can add a
+separate flat-rate valuation of the existing charge-on-arrival schedule. This retains the original
+arrival comparison; the extra comparison is disabled for a flat-rate main run. An arrival reference
+that violates operating conditions is explicitly non-comparable.
+
+### Historical weather and PV/BESS
+
+Daily PV uses a persistent Open-Meteo Archive cache. Select **ERA5** (default, approximately five
+days archive delay) or **ECMWF IFS** (archive from 2017 with more recent coverage), then use
+**Check weather coverage** or **Load missing weather**. Runs also prepare missing data automatically.
+The UI distinguishes cached dates, loading, incomplete dates, archive cutoffs and provider errors.
+A current/recent day can still lack hourly observations. Models have separate cache identities;
+there is no automatic model mixing or fabricated replacement irradiance.
+
+The Daily Cyclic PV model is an explicit horizontal-irradiance approximation:
+`PV kW = installed kWp × irradiance W/m² / 1000 × performance ratio` (default ratio 0.85).
+It does not model orientation, shading or cell temperature, and does not normalize output to the
+selected period's peak. Raw irradiance/temperature can be reused after changing PV capacity;
+each request records source/model, timestamps, units and snapshot evidence. Existing Short-Term
+and Flexible PV generation paths are unchanged. See [Daily Cyclic energy details](docs/daily-cyclic-energy.md).
+
+### Cache persistence and exports
+
+| Setting | Default / purpose |
+| :--- | :--- |
+| `EDOPT_PRICE_CACHE_PATH` | `backend/data/historical_prices.sqlite3`; persistent historical price observations. |
+| `EDOPT_WEATHER_CACHE_PATH` | `backend/data/historical_weather.sqlite3`; persistent raw weather per location/model. |
+| `EDOPT_DAILY_WORKERS` | Backend worker ceiling, capped at four and reduced by measured resource capacity. |
+
+For deployments, set cache paths to files on a persistent mounted volume. Local caches are reused
+after restart; deployment persistence cannot be inferred automatically. Shared preparation may finish
+in the background when a user cancels waiting.
+
+The **Complete Analysis Package** ZIP includes saved results, settings, exact archived requests,
+input evidence and detailed CSV tables. Daily runs also include historical weather evidence and
+BESS start/end checks. Exports run in a browser worker to keep the page responsive.
+
+**Route Summary CSV**, available on Results and Export for long-term analyses, is Excel-compatible
+and includes route ID, vehicle group, scheduled diesel-equivalent distance, electric distance including
+chosen charging detours, electrical feasibility, grid energy, semicolon-separated charging sites and
+an energy-source explanation. PV/BESS assignments are documented allocations, not per-bus metering.
+Only evaluated days contribute; year-labelled columns do not imply extrapolation of missing dates.
+The Results PDF button is currently disabled.
 
 ---
 
@@ -113,7 +200,7 @@ The frontend is responsible for user interaction and result presentation. The ba
 
 ### Prerequisites
 
-- **Node.js** 18.0 or higher and **npm**
+- **Node.js** 20.19+ (20.x) or 22.12+ and **npm** (Vite 8 requirement)
 - **Python** 3.10 or higher
 - Windows for the provided `.cmd` setup and start scripts
 
@@ -171,7 +258,9 @@ eDOPT/
 │   │   ├── services/
 │   │   │   ├── solver.py            # MILP model and optimization logic
 │   │   │   ├── price_service.py     # Electricity price retrieval and processing
-│   │   │   └── pv_service.py        # PV generation estimation
+│   │   │   ├── historical_prices.py # Strict historical price preparation
+│   │   │   ├── historical_weather.py # Cached ERA5/IFS and Daily PV profiles
+│   │   │   └── pv_service.py        # Legacy Short-Term/Flexible PV profiles
 │   │   └── utils/
 │   │       ├── excel_processor.py   # Vehicle circulation plan processing
 │   │       └── excel_exporter.py    # Result export generation
@@ -228,18 +317,18 @@ Vehicle specifications can be configured immediately after upload without genera
 Price assumptions are stored as edited; fetching prices applies them automatically, and a newly
 selected market date is synchronized on Continue if it has not yet been applied.
 
-After **Run Check**, routes without charging availability or with individually impossible
-energy requirements can be excluded using **Ignore and continue without these routes**.
-The energy check gives each bus optimistic charging access without competition or switching
-locks; failure already under those conditions identifies a route that cannot be served with
-the current battery, charging windows, power and final reserve. It also detects final reserve
-plus next-day energy exceeding battery capacity. Passing this check does not prove that the
-shared fleet infrastructure and switching rules are feasible. Solver failures remain visible
-on the settings page. The remaining fleet is checked again; unrelated errors still block
-optimization. Exclusions apply to single runs, all scenarios and
-long-term chunks, and are recorded in result metadata. Imported routes are retained and can
-be restored with **Alle Umläufe wieder einschließen**. Reprocessing a timetable clears the
-exclusions so corrected routes are reconsidered. At least one route must remain included.
+After **Run Check**, route diagnostics distinguish an energetically feasible timetable from one
+that also satisfies Start SoC = End SoC. `BUS_ENERGY_INFEASIBLE` is a proof only under the
+current model assumptions, with a concrete reason such as an unreachable trip minimum or final
+energy target. Small deficits use numerical tolerances without hiding genuine shortfalls.
+`NO_CHARGING_AVAILABILITY` is a warning that may indicate a missing site assignment; it is not
+by itself proof that a route is undrivable. The optimistic per-route check does not prove joint
+fleet feasibility under shared connectors and switching rules.
+
+Routes can be excluded explicitly where offered. Results retain exclusion causes: energetic proof,
+missing charging availability or manual exclusion. Unrelated errors still block optimization, and at
+least one route must remain. Imported routes and their settings are retained; reprocessing the
+timetable clears exclusions so corrected routes are reconsidered.
 
 Select the distance convention explicitly. **Previous detection** retains the original Wels
 interpretation. **Metres** and **kilometres** interpret all unlabelled values in the chosen unit.
@@ -299,8 +388,8 @@ Umlaufplan pill selector. Existing locations retain their capacities and switchi
 missing nodes are added to the matching location without creating duplicate assignments.
 Enter the actual
 number of connectors, power per connector, aggregate charging power and grid limit at each site.
-The existing fleet-wide grid and aggregate charging limits remain additional constraints; the legacy
-fleet-wide connector count is replaced by site connector counts. Continue automatically regenerates
+With separate locations enabled, each site uses its own grid, aggregate-power and connector
+limits. Legacy global limits apply to the single-site mode, not as an additional multi-site cap. Continue automatically regenerates
 the timetable after changes to node mappings. Intermediate stops can also be used without A/E trip markers.
 
 Charging is allowed only in full time slots contained in a stay, with no driving overlap. Physical
@@ -311,9 +400,11 @@ selection of different Monday/Tuesday timetables or public holidays.
 
 Each location supports multiple daily **no-switch windows**, including windows crossing midnight.
 Equal start/end times block switching all day. During a window, a parked connected bus keeps its
-connector even at zero charging power. Power can still be modulated automatically. Timetable
-departures are always permitted. An optional setting allows a newly arriving bus to connect once to
-a free connector; it cannot displace another parked vehicle. Lock boundaries within a time slot
+connector even at zero charging power. Depending on the configured lock charging mode, power
+remains optimized or is allocated as evenly as possible across chargeable buses within the
+configured power/SoC limits. Timetable departures are always permitted. A newly arriving bus can
+connect to a free connector during a lock; it cannot displace another parked vehicle or manually
+disconnect before the lock ends. Lock boundaries within a time slot
 are treated conservatively by blocking switching for that slot. Connector identity within a site is
 interchangeable: connectors at one site share the same configured power rating.
 
@@ -326,8 +417,11 @@ site/connection rules and reports unmet operating requirements instead of presen
 valid cost comparison. Results and Excel exports include site power, grid import and occupied
 connectors, bus connection schedules, and site settings.
 
-Backend regression tests: `cd backend` followed by `.venv\Scripts\python.exe -m unittest discover -s tests`.
-Frontend profile, import, fleet exclusion and optional trip tests: `cd frontend` followed by `node --test tests/charging.test.mjs tests/timetableImport.test.mjs tests/optimizationFleet.test.mjs tests/opportunity.test.mjs`.
+Run focused checks for the changed feature rather than the full suite by default. For Daily
+PV/BESS: in `backend`, set `PYTHONPATH=.;tests` in PowerShell and run
+`.venv\Scripts\python.exe -m unittest test_historical_weather test_daily_energy`; in `frontend`,
+run `node --test tests/dailyEnergy.test.mjs tests/dailyParallel.test.mjs`. Build the UI with
+`npm run build`. Other regression modules are in `backend/tests` and `frontend/tests`.
 
 ## Source Data
 

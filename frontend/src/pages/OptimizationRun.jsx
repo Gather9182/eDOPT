@@ -1,3 +1,5 @@
+import HistoricalWeatherStatus from '../components/HistoricalWeatherStatus';
+import {historicalWeatherDay,prepareHistoricalWeather} from '../services/api';
 import {flatRateSettings,flatRateIssues,flatRateQuotes,applyFlatRateInputs,mergeFlatRateResults,priceEvidenceForRun} from '../utils/flatRate';
 import CustomSelect from '../components/CustomSelect';
 import OptimizationProgress from '../components/OptimizationProgress';
@@ -23,7 +25,7 @@ import OptimizationFailurePanel from '../components/OptimizationFailurePanel';
 import { inputsWithRealizedVisits, resolvedOpportunityConfig, opportunityImportNeedsRefresh } from '../utils/opportunity';
 import { captureValidationContext, validationDiagnostic, optimizationDiagnostic, diagnosticClone, diagnosticFiles, diagnosticZip } from '../utils/diagnosticExport';
 import { archiveChunkRequest, runAuditMetadata } from '../utils/resultAnalysisExport';
-import {checkOptimizationCancelled} from '../utils/optimizationProgress';
+import {checkOptimizationCancelled,cancellationError} from '../utils/optimizationProgress';
 
 const InfoTooltip = ({ title, text, align = 'center' }) => (
   <div className="tooltip-container">
@@ -44,6 +46,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
   const [timeLeftText, setTimeLeftText] = useState('');
   const [solverPending, setSolverPending] = useState(false);
   const [liveProgress, setLiveProgress] = useState(null);
+  const [weatherPreparation,setWeatherPreparation]=useState(null);
   const [scenario, setScenario] = useState(projectData.meta.scenario || 'baseline');
   const [pvConfig, setPvConfig] = useState(projectData.constraints?.pv_config || {
     capacity_kw: 0,
@@ -492,12 +495,12 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
   const runDailySimulation = async () => {
     setStatus('running');setRunStartTime(Date.now());setProgress(2);
     setLogs([]);logsRef.current=[];
-    const project=diagnosticClone(projectData),settings=diagnosticClone(localSettings);
+    const project=diagnosticClone(projectData),settings=diagnosticClone(localSettings),dailyPvConfig=diagnosticClone({...pvConfig,latitude:projectData.meta.latitude ?? pvConfig.latitude,longitude:projectData.meta.longitude ?? pvConfig.longitude}),dailyBessConfig=diagnosticClone(bessConfig);
     const buses=optimizationFleet(project).included;
     const keys=[];
     const runId=analysisRunRef.current.id;
     try {
-      const issues=dailyConfigurationIssues({...project,buses},settings,scenario);
+      const issues=dailyConfigurationIssues({...project,buses},settings,scenario,dailyBessConfig);
       if (issues.length) throw new Error(issues.map(issue=>issue.message).join(' '));
       addLog('Validating historical calendar in Europe/Vienna. Daily Cyclic repeats the configured timetable; no calendar-day timetable changes.');
       const {dates,excluded_dates:excludedDates=[]}=await historicalCalendar(longTermConfig.startDate,longTermConfig.endDate,settings.time_resolution);
@@ -511,6 +514,15 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       checkOptimizationCancelled(runAbortRef.current?.signal);
       addLog(selection.flatRateEnabled ? `Flat-rate-only run: ${selection.flatRateEurKwh} EUR/kWh before configured fees/taxes; no market prices requested.` : selection.source==='smard' ? `Price cache: ${priceReport.complete_days}/${priceReport.required_days} complete days; ${priceReport.missing_days} missing; ${priceReport.external_requests} external requests.` : 'aWATTar explicitly selected: prices are fetched and strictly checked per date. No automatic SMARD switch.');
       if(priceReport.missing_days) addLog('Partial evaluation: incomplete-price dates will remain excluded unless targeted gap preparation recovers them.');
+      const weatherOptions={model:dailyPvConfig.weather_model || 'era5',latitude:dailyPvConfig.latitude ?? project.meta.latitude,longitude:dailyPvConfig.longitude ?? project.meta.longitude,resolution:settings.time_resolution};
+      const needWeather=['pv','pv_bess'].includes(scenario) && Number(dailyPvConfig.capacity_kw)>0;
+      let weatherReport=null;
+      if(needWeather) {
+        addLog('Preparing persistent historical weather before launching daily jobs.');
+        weatherReport=await prepareHistoricalWeather({first:longTermConfig.startDate,last:longTermConfig.endDate,...weatherOptions},{signal:runAbortRef.current?.signal,onProgress:setWeatherPreparation});
+        addLog(`Weather cache: ${weatherReport.complete_days}/${weatherReport.required_days} complete days; ${weatherReport.missing_days} missing; ${weatherReport.external_requests} external requests.`);
+      } else setWeatherPreparation(null);
+      const weatherSnapshots={...(weatherReport?.day_snapshot_hashes || {})};
       let capacity=1,capabilityReport=null;
       try {
         capabilityReport=await optimizationCapabilities();
@@ -522,7 +534,16 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       setDailyExecution({requested:longTermConfig.dailyWorkers || 2,capacity,capabilityReport,used_workers:concurrency,mode:concurrency>1 ? 'seed' : 'serial'});
       addLog(`Daily Cyclic: requested ${longTermConfig.dailyWorkers || 2} worker(s), host permits ${capacity}, using at most ${concurrency}.`);
       setDayStatuses(Object.fromEntries(dates.map(date=>[date,'not_calculated'])));
-      const run=await runDailyCyclic({project,settings,buses,dates,excludedDates,
+      const run=await runDailyCyclic({project,settings,buses,dates,excludedDates,scenario,pvConfig:dailyPvConfig,bessConfig:dailyBessConfig,
+        fetchWeather:async(date,{signal,retry=false}={})=>{
+          if(retry) {
+            const updated=await prepareHistoricalWeather({first:date,last:date,...weatherOptions},{signal,onProgress:setWeatherPreparation});
+            Object.assign(weatherSnapshots,updated.day_snapshot_hashes || {});
+          }
+          const day=await historicalWeatherDay(date,{...weatherOptions,capacity_kw:dailyPvConfig.capacity_kw,performance_ratio:dailyPvConfig.performance_ratio ?? .85},signal);
+          if(weatherSnapshots[date] && weatherSnapshots[date]!==day.source_snapshot_hash) throw new Error(`${date}: selected weather observations changed after preparation. No mixed revision was silently accepted; retry will recheck this date.`);
+          return day;
+        },
         concurrency,retryPriceFailures:longTermConfig.retryPriceFailures!==false,signal:runAbortRef.current?.signal,
         onExecution:execution=>setDailyExecution(previous=>({...previous,...execution})),
         onDayProgress:day=>setDayStatuses(previous=>({...previous,[day.date]:day.status})),
@@ -551,9 +572,10 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       if (payload) {
         payload.daily_execution={...payload.daily_execution,host_capabilities:capabilityReport};
         payload.historical_price_preparation=priceReport;
+        payload.historical_weather_preparation=weatherReport ? {...weatherReport,final_expected_day_snapshot_hashes:weatherSnapshots} : null;
         payload.run_metadata={...fleetRunMetadata(project),...runAuditMetadata(analysisRunRef.current.context,validationState?.diagnostic,logsRef.current,analysisRunRef.current.requests),
-          run_id:runId,timestamp:new Date().toISOString(),scenario:'baseline',is_long_term:true,long_term_mode:'daily_cyclic',
-          settings:{...settings,longTermConfig:{...longTermConfig,chunkSizeHours:24}},
+          run_id:runId,timestamp:new Date().toISOString(),scenario,is_long_term:true,long_term_mode:'daily_cyclic',
+          settings:{...settings,pvConfig:dailyPvConfig,bessConfig:dailyBessConfig,longTermConfig:{...longTermConfig,chunkSizeHours:24}},
           inputs:{...run.records.find(record=>record.status==='completed').request,start_date:longTermConfig.startDate,end_date:longTermConfig.endDate},daily_checkpoints:keys};
         await setItem('optimization_results',payload);
       }
@@ -573,8 +595,9 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
       addLog(`Daily Cyclic completed: ${dates.length} verified daily results saved.`);
       setStatus('success');onComplete('results');
     } catch (error) {
-      addLog(`Daily Cyclic error: ${error.response?.data?.detail || error.message}`);
-      recordOptimizationFailure(error);setStatus('ready');
+      const failure = runAbortRef.current?.signal?.aborted ? cancellationError() : error;
+      addLog(`Daily Cyclic: ${failure.response?.data?.detail || failure.message}`);
+      recordOptimizationFailure(failure);setStatus('ready');
     }
   };
 
@@ -1013,7 +1036,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
     const policyIssues = [...flatRateIssues(projectData), ...solverTimeLimitIssues(localSettings), ...socPolicyIssues(localSettings), ...endConditionIssues(localSettings, simulationMode), ...chargingCurveIssues(localSettings),
       ...(simulationMode==='single' && projectData.buses.length && !marketPricesCurrent(projectData,projectData.meta.price_requested_date || projectData.meta.price_date || new Date().toISOString().slice(0,10),localSettings.planning_horizon,localSettings.time_resolution)
         ? [{type:'ERROR',category:'data',code:'PRICE_SOURCE_NOT_LOADED',message:'Load complete prices for the selected source, date, horizon and resolution under Market price source. Previously loaded prices cannot be silently relabelled or repeated.'}] : []),
-      ...(simulationMode === 'daily_cyclic' ? dailyConfigurationIssues({...projectData,buses:busesToValidate},localSettings,scenario) : [])];
+      ...(simulationMode === 'daily_cyclic' ? dailyConfigurationIssues({...projectData,buses:busesToValidate},localSettings,scenario,bessConfig) : [])];
     if (policyIssues.length) {
       recordValidation({status:'invalid',issues:policyIssues}, null, 'frontend');
       setIsValidating(false);
@@ -1717,9 +1740,11 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                     </div>
                     <CustomSelect
                       className="form-input h-9 text-xs"
-                      value={pvConfig.profile_mode}
+                      value={simulationMode==='daily_cyclic' ? 'historical_cache' : pvConfig.profile_mode}
+                      disabled={simulationMode==='daily_cyclic'}
                       onChange={(e) => setPvConfig(prev => ({ ...prev, profile_mode: e.target.value }))}
                     >
+                      {simulationMode==='daily_cyclic' && <option value="historical_cache">Historical ERA5 · persistent cache</option>}
                       <option value="bell_curve">Standard Bell-Curve (Auto)</option>
                       <option value="open_meteo">Open-Meteo Calculation</option>
                       <option disabled>Custom Upload (CSV)</option>
@@ -1742,7 +1767,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
                     </div>
                   </div>
 
-                  {pvConfig.profile_mode === 'open_meteo' ? (
+                  {simulationMode!=='daily_cyclic' && pvConfig.profile_mode === 'open_meteo' ? (
                     <div className="form-group mb-0">
                       <div className="flex items-center justify-between mb-1">
                         <label className="form-label text-[10px] uppercase font-bold text-muted mb-0">Reference Date</label>
@@ -2057,7 +2082,9 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
 
             <PriceSourceSettings project={projectData} setProject={setProjectData} loadPrices={simulationMode==='single'} hours={localSettings.planning_horizon} resolution={localSettings.time_resolution} />
             {simulationMode !== 'daily_cyclic' && <p className="text-sm text-muted">Short-Term and Flexible use complete nominal 24-hour price horizons. A horizon containing a 23/25-hour DST date is rejected explicitly; use Daily Cyclic for date ranges with skipped DST dates.</p>}
-            {simulationMode === 'daily_cyclic' && <p className="text-sm text-muted mt-4">Baseline only: one complete 24-hour solve per historical date, using the same configured daily timetable. Daily bus SoC equality and physical connector continuity are checked. Daylight-saving transition days (23/25 hours) are skipped, clearly marked and excluded from all totals; the remaining dates continue normally. No replacement prices or results are generated. Prices are strictly validated. Overnight optional charging visits are not supported. No weekend/holiday timetable changes or global multi-day optimum. Both date endpoints are included. Run Check validates technical settings; prices are checked again for each actual day.</p>}
+            {simulationMode === 'daily_cyclic' && <p className="text-sm text-muted mt-4">Baseline, PV, BESS or PV+BESS: one complete 24-hour solve per historical date, using the same configured daily timetable. Daily bus SoC equality and physical connector continuity are checked. BESS uses the same configured start/end energy every day; no inter-day energy shifting. BESS temperature derating is not supported in this mode. Daylight-saving transition days (23/25 hours) are skipped, clearly marked and excluded from all totals; the remaining dates continue normally. No replacement prices or results are generated. Prices are strictly validated. Overnight optional charging visits are not supported. No weekend/holiday timetable changes or global multi-day optimum. Both date endpoints are included. Run Check validates technical settings; prices and required weather are checked again for each actual day.</p>}
+            {simulationMode==='daily_cyclic' && ['pv','pv_bess'].includes(scenario) && <HistoricalWeatherStatus state={weatherPreparation} setState={setWeatherPreparation} controls pvConfig={pvConfig} setPvConfig={setPvConfig}
+              options={{first:longTermConfig.startDate,last:longTermConfig.endDate,model:pvConfig.weather_model || 'era5',latitude:projectData.meta.latitude ?? pvConfig.latitude,longitude:projectData.meta.longitude ?? pvConfig.longitude,resolution:localSettings.time_resolution}} />}
             {simulationMode !== 'single' && (
               <div className={`price-run-grid ${simulationMode==='daily_cyclic' ? 'is-daily' : ''}`}>
                 <div className="form-group mb-0">
@@ -2228,7 +2255,7 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
           <div className="progress-bar-container" role="progressbar" aria-label="Optimization in progress">
             <div className="progress-bar progress-bar-indeterminate"></div>
           </div>
-          <p className="text-sm text-muted" style={{maxWidth:520,margin:'12px auto 0'}}>{simulationMode==='daily_cyclic' ? 'Track price preparation, completed days and active jobs below.' : 'Live backend phases and solver evidence are shown below. The optimization gap is not a completion percentage.'}</p>
+          <p className="text-sm text-muted" style={{maxWidth:520,margin:'12px auto 0'}}>{simulationMode==='daily_cyclic' ? 'Track price/weather preparation, completed days and active jobs below.' : 'Live backend phases and solver evidence are shown below. The optimization gap is not a completion percentage.'}</p>
           <button className="btn btn-outline mt-4" disabled={isCancelling} onClick={()=>{
             setIsCancelling(true);
             runAbortRef.current?.abort();
@@ -2241,6 +2268,8 @@ const OptimizationRun = ({ projectData, setProjectData, onComplete }) => {
             </div>
           )}
           <div className="running-status-panels">
+          {simulationMode==='daily_cyclic' && ['pv','pv_bess'].includes(scenario) && weatherPreparation && <HistoricalWeatherStatus state={weatherPreparation} />}
+
           {simulationMode!=='single' && !flatRateSettings(projectData).enabled && priceSelection(projectData).source==='smard' && <HistoricalPriceStatus state={pricePreparation} />}
           {simulationMode==='daily_cyclic'
             ? <DailyRunProgress statuses={dayStatuses} telemetry={dayLiveProgress} execution={dailyExecution} />

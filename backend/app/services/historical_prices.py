@@ -240,16 +240,17 @@ class HistoricalPrices:
 
 
 class PricePreparationJobs:
-    def __init__(self):
-        self.pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix='edopt-prices');self.lock=threading.Lock();self.jobs={}
+    def __init__(self,factory=HistoricalPrices,label='price'):
+        self.factory=factory;self.label=label
+        self.pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix=f'edopt-{label}');self.lock=threading.Lock();self.jobs={}
 
     def start(self,options):
         with self.lock:
-            if sum(job['status'] in ('queued','running') for job in self.jobs.values())>=4:raise PriceDataError('IMPORT_QUEUE_FULL','Price preparation queue is full.')
+            if sum(job['status'] in ('queued','running') for job in self.jobs.values())>=4:raise PriceDataError('IMPORT_QUEUE_FULL',f'{self.label} preparation queue is full.')
             for key in list(self.jobs):
                 if len(self.jobs)<8:break
                 if self.jobs[key]['status'] not in ('queued','running'):del self.jobs[key]
-            key=uuid.uuid4().hex;self.jobs[key]=dict(status='queued',message='Waiting for price preparation.');self.pool.submit(self._run,key,options)
+            key=uuid.uuid4().hex;self.jobs[key]=dict(status='queued',message=f'Waiting for {self.label} preparation.');self.pool.submit(self._run,key,options)
             return key
 
     def _run(self,key,options):
@@ -257,7 +258,7 @@ class PricePreparationJobs:
             with self.lock:self.jobs[key].update(value)
         update(dict(status='running'))
         try:
-            result=HistoricalPrices().prepare(**options,notify=update)
+            result=self.factory().prepare(**options,notify=update)
             update(dict(status='completed',result=result))
         except Exception as error:update(dict(status='failed',error=dict(code=getattr(error,'code','IMPORT_FAILED'),message=str(error))))
 

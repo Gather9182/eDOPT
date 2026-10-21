@@ -9,7 +9,7 @@ Die anschließende optionale Parallelisierung und ihre Randbedingungen sind in
 ## Bedienung und Umfang
 
 In Optimization Engine den Modus **Long-Term / Daily Cyclic** wählen,
-**Baseline** sowie Start- und Enddatum einstellen. Run Check prüft die
+**Baseline, PV, BESS oder PV+BESS** sowie Start- und Enddatum einstellen. Run Check prüft die
 technischen Eingaben und den Kalender; beim Start werden die historischen
 Preise für jeden Tag gesondert geprüft.
 
@@ -46,8 +46,7 @@ Kosten und Energie werden vor dem nächsten Tag geprüft.
   Im gekoppelten seriellen Modus beginnt nach der Lücke ein unabhängiger
   Abschnitt mit konfigurierten Anfangswerten; kein Zustandsübergang über die
   ausgelassene Zeit wird behauptet.
-- Zunächst nur Baseline. PV/BESS und optionale Ladeaufenthalte über Mitternacht
-  werden in diesem Modus ausdrücklich abgelehnt.
+- PV/BESS sind ebenfalls möglich; siehe `daily-cyclic-energy.md`. BESS muss täglich mit seinem konfigurierten Anfangsenergieinhalt enden. Temperatur-Derating und optionale Ladeaufenthalte über Mitternacht sind weiterhin nicht unterstützt.
 - Der bestehende flexible Modus behält 24/48/72h und seinen bisherigen
   Preis-Fallback. Er wird im Export nicht als streng historisch verifiziert
   gekennzeichnet. Für den belegten historischen Tagesvergleich Daily Cyclic wählen.

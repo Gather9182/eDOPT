@@ -3,14 +3,12 @@ import React from 'react';
 export default function HistoricalPriceStatus({state}) {
   if(!state) return null;
   const result=state.result;
-  return <details className="card run-status-panel historical-price-status">
-    <summary className="run-status-summary">
-      <span className="run-status-title">Historical AT price data <small>SMARD · CC BY 4.0</small></span>
-      <span className={`run-status-overview ${state.error || result?.missing_days ? 'text-warning' : ''}`}>
-        {result ? `${result.complete_days} / ${result.required_days} days complete · ${result.missing_days} missing` : state.error ? 'Preparation failed — show details' : state.message || 'Preparing historical data…'}
-      </span>
+  return <details className="price-source-panel price-source-disclosure live-status-disclosure historical-price-status">
+    <summary className="price-source-summary">
+      <span className="price-source-summary-copy"><strong>Historical AT price data</strong><small>{result ? `${result.complete_days} / ${result.required_days} days cached · ${result.missing_days} missing` : state.error ? 'Preparation failed — show details' : state.message || 'Preparing historical data…'}</small></span>
+      <span className="price-source-summary-badge">SMARD · cache first</span>
     </summary>
-    <div className="run-status-body" role="status" aria-live="polite">
+    <div className="price-source-body" role="status" aria-live="polite">
     <p>{state.message || (state.status==='completed' ? 'Price preparation finished.' : state.status==='failed' ? 'Price preparation failed.' : 'Preparing historical data before solver jobs start.')}</p>
     {state.total_blocks>0 && <p>{state.completed_blocks} / {state.total_blocks} blocks loaded</p>}
     {result && <>

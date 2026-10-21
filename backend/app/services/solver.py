@@ -280,7 +280,9 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
         solver_logs.append("[Solver] Scenario 'Baseline + BESS' active: Zeroing Photovoltaic profile.")
         pv_gen_profile = [0.0] * num_periods
     else:
-        pv_gen_profile = pv_config.profile_kwh
+        pv_gen_profile = pv_config.profile_kw if pv_config.profile_kw is not None else pv_config.profile_kwh
+        if inputs.daily_cyclic and (pv_gen_profile is None or len(pv_gen_profile)!=num_periods or any(not np.isfinite(value) or value<0 for value in pv_gen_profile)):
+            raise ValueError("Daily Cyclic requires a complete finite PV kW profile from prepared weather; no fallback profile is used.")
         if pv_gen_profile is None or len(pv_gen_profile) == 0:
             if pv_config.profile_mode == "open_meteo" and pv_config.latitude and pv_config.longitude:
                 pv_gen_profile = await PVService.get_profile(pv_config, num_periods, inputs.time_step_minutes, solver_logs)
@@ -413,6 +415,8 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
     # 3. BESS Constraints
     eff_bess = bess_cfg.efficiency
     prob += (b_soc[0] == bess_cfg.initial_soc_kwh)
+    if inputs.daily_cyclic:
+        prob += b_soc[num_periods] == bess_cfg.initial_soc_kwh, "daily_bess_energy_cycle"
     for t in range(num_periods):
         # SoC dynamics
         prob += (
@@ -460,7 +464,7 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
                            (pv_gen_profile,pv_curtailed,b_charge,b_discharge,b_soc,bess_cfg),solver_logs)
     # --- Solve ---
     minimum_soc_deviation = solve_soc_policy(prob, inputs, soc_vars, solver_logs)
-    status = solver_solution_status(prob)
+    solver_status = solver_solution_status(prob)
     report_progress('processing_results','Building charging schedules and reference comparison.',metrics={})
 
     # --- Extract Results ---
@@ -530,13 +534,13 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
         
         if charged_to_bat < 0.1:
             reason = "No charging required: Initial SoC sufficient for all trips."
-            status = "healthy"
+            diag_status = "healthy"
         elif final_soc < final_threshold - 0.5:
             reason = "Constraint Violation: Insufficient time/power to meet readiness buffer."
-            status = "critical"
+            diag_status = "critical"
         else:
             reason = "Charging requirement fully met (Optimized)."
-            status = "healthy" if min_reached > 20 else "warning"
+            diag_status = "healthy" if min_reached > 20 else "warning"
 
         bus_diagnostics.append(BusDiagnostic(
             id=bus.id,
@@ -547,13 +551,23 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
             total_trip_energy_kwh=sum(bus.trip_energy_profile_kwh)+sum(visit_results.get('additional_trip_energy_profiles',{}).get(bus.id,[])),
             total_charged_energy_kwh=charged_to_bat,
             is_charged=charged_to_bat > 0.1,
-            status_flag=status,
+            status_flag=diag_status,
             diagnostic_reason=reason, target_initial_soc_kwh=bus.initial_soc_kwh,
             target_min_final_soc_kwh=end_target(inputs, bus),
             next_day_required_energy_kwh=bus.next_day_required_energy_kwh if inputs.use_next_day_readiness else 0
         ))
 
+    if inputs.daily_cyclic:
+        # Thermal state is explicitly outside the independent-day model. Do not
+        # export a reset/illustrative thermal trajectory as a continuous history.
+        ambient_temp_prof=[];cell_temp_prof=[]
+        cap_factor_prof=[1.0]*num_periods
+        max_usable_cap_prof=[bess_cfg.capacity_kwh]*num_periods
     return OptimizationResult(
+        weather_evidence=inputs.weather_evidence,
+        bess_cycle=dict(enabled=True,initial_energy_kwh=b_soc_prof[0],final_energy_kwh=b_soc_prof[-1],
+            target_energy_kwh=bess_cfg.initial_soc_kwh,tolerance_kwh=.001,compliant=abs(b_soc_prof[-1]-bess_cfg.initial_soc_kwh)<=.001,
+            scope='Independent daily storage cycle; no energy transfer between dates.') if inputs.daily_cyclic and inputs.scenario in ('bess','pv_bess') else {},
         **flat_rate_results(inputs,baseline_load,total_cost,baseline_issues),
         soc_policy=soc_policy_results(inputs, soc_profiles, minimum_soc_deviation),
         end_condition=end_condition_results(inputs, soc_profiles),
@@ -590,8 +604,8 @@ async def run_extended_milp_solver(inputs: OptimizationInputs, solver_logs: List
         electricity_prices=inputs.electricity_prices,
         market_prices=inputs.market_prices,
         bus_diagnostics=bus_diagnostics,
-        optimization_gap=0.0 if status=='Optimal' else None,
-        status=f"Scenario {inputs.scenario} solved ({status})",
+        optimization_gap=0.0 if solver_status=='Optimal' else None,
+        status=f"{solver_status} (Scenario {inputs.scenario})",
         ambient_temperature_profile_c=ambient_temp_prof,
         bess_cell_temperature_profile_c=cell_temp_prof,
         bess_capacity_factor_profile=cap_factor_prof,
@@ -695,6 +709,7 @@ async def run_milp_solver(inputs: OptimizationInputs, solver_logs: List[str] = N
     baseline_cost = np.sum(baseline_load * np.array(inputs.electricity_prices) * delta_t / 1000.0)
 
     return OptimizationResult(
+        weather_evidence=inputs.weather_evidence,
         **flat_rate_results(inputs,baseline_load,total_cost_eur,baseline_issues),
         soc_policy=soc_policy_results(inputs, soc_profiles, minimum_soc_deviation),
         end_condition=end_condition_results(inputs, soc_profiles),

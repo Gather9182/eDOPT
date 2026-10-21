@@ -231,7 +231,9 @@ test('daily mode overrides only its own end condition and refuses unsupported sc
   const {project,settings,buses}=fixture();
   const request=buildSolverInputs(project,{...settings,use_cyclic_soc:false,use_next_day_readiness:true},{buses,daily:true});
   assert.equal(request.use_next_day_readiness,false);assert.equal(request.use_cyclic_soc,true);
-  assert.equal(dailyConfigurationIssues({...project,buses},settings,'pv').length,1);
+  assert.equal(dailyConfigurationIssues({...project,buses},settings,'pv').length,0);
+  assert.equal(dailyConfigurationIssues({...project,buses},settings,'compare_all').length,1);
+  assert.equal(dailyConfigurationIssues({...project,buses},settings,'bess',{enable_temperature_capacity_derating:true}).length,1);
   assert.deepEqual(endConditionIssues({...settings,use_next_day_readiness:true},'daily_cyclic'),[]);
   assert.ok(dailyConfigurationIssues({...project,buses:[{...buses[0],opportunity_visits:[{pause_start_min:1300,pause_end_min:1500}]}]},settings,'baseline').length);
   for (const hours of [24,48,72]) {
